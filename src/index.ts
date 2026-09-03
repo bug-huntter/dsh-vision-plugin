@@ -431,6 +431,22 @@ export function apply(ctx: Context): void {
       logger?.error('vision-plugin: failed to install image pipeline patches', error)
     }
   })
+
+  // Expose the settings namespace to the web configuration boundary. The
+  // api-proxy's settings.mutate/update/replace only serve namespaces that are
+  // registered through registerConfigurableProviders or the explicit
+  // WEB/PRODUCT allowlists. Without this registration the settings page can
+  // read the namespace (describe) but every write is refused with
+  // "settings-not-exposed", which surfaces as "保存失败，请重试".
+  ctx.inject(['settings', 'llm'], (both) => {
+    const handle = both.llm.registerConfigurableProviders([{
+      provider: 'vision-plugin-settings',
+      displayName: '识图模型配置',
+      settingsNs: VISION_PLUGIN_NAMESPACE,
+      settingsPath: [],
+    }])
+    both.effect(() => handle, 'vision-plugin: settings namespace exposure')
+  })
 }
 
 export { VISION_PLUGIN_NAMESPACE }

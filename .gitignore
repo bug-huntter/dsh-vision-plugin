@@ -1,0 +1,30 @@
+# Build output (published artifacts)
+lib/
+
+# Dependencies
+node_modules/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# npm lock files (publications list no lock; keep only root lock in a workspace)
+package-lock.json
+
+# TypeScript build info
+*.tsbuildinfo
+
+# WorkBuddy / dev notes
+.workbuddy/
