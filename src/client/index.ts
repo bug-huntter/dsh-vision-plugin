@@ -122,8 +122,10 @@ export function apply(ctx: ClientContext): void {
       }
       await scope.load()
       drafts.clear()
-    } catch {
+    } catch (error: unknown) {
       failed = true
+      // eslint-disable-next-line no-console
+      console.error('vision-plugin: failed to save section', error)
     } finally {
       saving = false
       publish()
@@ -132,13 +134,19 @@ export function apply(ctx: ClientContext): void {
 
   // --- Tab toggle ---
   const onToggle = (): void => {
-    const current = publishSnapshot().enabled
+    const snapshot = publishSnapshot()
+    if (snapshot.saving || !snapshot.writable) return
+    const current = snapshot.enabled
     saving = true
     failed = false
     publish()
     scope.set('enabled', !current)
       .then(() => scope.load())
-      .catch(() => { failed = true })
+      .catch((error: unknown) => {
+        failed = true
+        // eslint-disable-next-line no-console
+        console.error('vision-plugin: failed to toggle enabled state', error)
+      })
       .finally(() => {
         saving = false
         publish()
@@ -168,6 +176,14 @@ export function apply(ctx: ClientContext): void {
       },
       saving: {
         getSnapshot: () => store.getSnapshot().saving,
+        subscribe: (listener) => store.subscribe(listener),
+      },
+      failed: {
+        getSnapshot: () => store.getSnapshot().failed,
+        subscribe: (listener) => store.subscribe(listener),
+      },
+      writable: {
+        getSnapshot: () => store.getSnapshot().writable,
         subscribe: (listener) => store.subscribe(listener),
       },
     },

@@ -409,27 +409,27 @@ function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPlug
   }, 'vision-plugin: image transcription boundary')
 }
 
-function exposeSettingsNamespace(ctx: Context): void {
-  const handle = ctx.llm.registerConfigurableProviders([{
-    provider: 'vision-plugin-settings',
-    displayName: 'Vision Plugin',
-    settingsNs: VISION_PLUGIN_NAMESPACE,
-    settingsPath: [],
-  }])
-  ctx.effect(() => handle, 'vision-plugin: settings namespace exposure')
-}
-
 /** Register the settings namespace and arm the vision pipeline. */
 export function apply(ctx: Context): void {
+  // Register the namespace in its own inject so a failure in the LLM/attachment
+  // patching phase never tears down the settings scope that the UI needs.
   let scope: SettingsScope<VisionPluginSettings> | undefined
   ctx.inject(['settings'], (settingsCtx) => {
     scope = settingsCtx.settings.register(settingsNamespace(VISION_PLUGIN_NAMESPACE), VisionPluginSettingsSchema)
   })
-  ctx.inject(['settings', 'llm'], (both) => {
+
+  // Image pipeline: needs settings (for the registered scope), llm, and the
+  // durable attachment reader. Wrapped in try/catch so the UI remains usable
+  // and the error is logged even if the runtime surface changes shape.
+  ctx.inject(['settings', 'llm', 'attachments'], (both) => {
     if (scope === undefined) return
-    exposeSettingsNamespace(both)
-    installImageGuardBypass(both, scope, both.llm)
-    installImageTranscription(both, scope, both.llm)
+    try {
+      installImageGuardBypass(both, scope, both.llm)
+      installImageTranscription(both, scope, both.llm)
+    } catch (error: unknown) {
+      const logger = both.logger ?? ctx.logger
+      logger?.error('vision-plugin: failed to install image pipeline patches', error)
+    }
   })
 }
 

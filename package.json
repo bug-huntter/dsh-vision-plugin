@@ -33,6 +33,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
+    "sync": "node sync.mjs",
     "prepublishOnly": "node build.mjs"
   },
   "license": "MIT",
