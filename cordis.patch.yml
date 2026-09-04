@@ -1,4 +1,4 @@
-# @dsh/vision-plugin bundle patch: inserts the dual-face plugin row into the web
+# @lp181818/dsh-vision-plugin bundle patch: inserts the dual-face plugin row into the web
 # profile roster. Applied as a profile bundle layer over dsh-base.
 #
 # The row is a bare plugin by package name: the node half (exports ".") registers
@@ -6,4 +6,4 @@
 # package.json makes the browser half load in the web GUI.
 - insert:
     - id: vision-plugin
-      name: 'dsh-vision-plugin'
+      name: '@lp181818/dsh-vision-plugin'

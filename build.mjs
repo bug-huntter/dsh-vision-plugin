@@ -1,5 +1,5 @@
 /**
- * build.mjs — standalone build script for @dsh/vision-plugin.
+ * build.mjs — standalone build script for @lp181818/dsh-vision-plugin.
  *
  * Produces:
  *   lib/index.js        Node half (register settings namespace)

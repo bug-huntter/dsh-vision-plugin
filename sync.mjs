@@ -1,11 +1,11 @@
 /**
  * sync.mjs — copy the built lib/ artifacts into every installed DSH profile.
  *
- * DSH installs this plugin via a `file:` dependency with `nodeLinker: hoisted`,
+ * DSH installs this plugin as an npm dependency with `nodeLinker: hoisted`,
  * which copies (not symlinks) the package into each profile's node_modules.
  * Editing the workspace and running `node build.mjs` therefore does NOT update
  * what DSH actually loads — the artifacts must be re-copied into
- * `~/.dsh/profiles/<profile>/node_modules/@dsh/vision-plugin/lib/`.
+ * `~/.dsh/profiles/<profile>/node_modules/@lp181818/dsh-vision-plugin/lib/`.
  *
  * Usage: node sync.mjs   (run after `node build.mjs`)
  */
@@ -84,7 +84,7 @@ for (const profile of profiles) {
 }
 
 if (synced === 0) {
-  console.log('no installed vision-plugin copies found; install it first with `dsh plugin add file:<path>`')
+  console.log(`no installed ${PACKAGE_NAME} copies found; install it first with \`dsh plugin add ${PACKAGE_NAME}\``)
 } else {
   console.log(`done: synced ${synced} profile(s). Restart DSH for changes to take effect.`)
 }

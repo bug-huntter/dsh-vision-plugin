@@ -11,7 +11,7 @@ DSH 图片识别插件 — 为 AI 会话添加图片理解能力。
 
 ## 手动安装
 ```bash
-dsh plugin add dsh-vision-plugin
+dsh plugin add @lp181818/dsh-vision-plugin
 ```
 
 ## 效果展示
@@ -59,7 +59,7 @@ dsh plugin add dsh-vision-plugin
 
 ```bash
 # 从 npm registry 安装（推荐）
-dsh plugin add dsh-vision-plugin
+dsh plugin add @lp181818/dsh-vision-plugin
 ```
 
 #### 2. 启动/重启 DSH Web
