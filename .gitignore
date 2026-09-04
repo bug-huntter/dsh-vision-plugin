@@ -1,6 +1,9 @@
 # Build output (published artifacts)
 lib/
 
+# Packed tarballs
+*.tgz
+
 # Dependencies
 node_modules/
 
