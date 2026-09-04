@@ -1,7 +1,6 @@
 /**
- * Vision Plugin browser half: registers the "Image Recognition" plugins tab
- * (with an interactive toggle) and the "Vision Model Config" settings section
- * (with full model parameter configuration).
+ * Vision Plugin browser half: registers the "Vision Model Config" settings
+ * section with the model parameters and the single enable switch.
  *
  * Settings scope lifecycle (load + invalidation) is handled by
  * ctx.settingsScope.bind(), which wires connection/reset and
@@ -16,7 +15,6 @@ import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { VISION_PLUGIN_NAMESPACE } from '../constants.ts'
 import type { VisionPluginSettings } from '../index.ts'
-import { VisionPluginsTab, type VisionPluginsTabInjected } from './VisionPluginsTab.tsx'
 import {
   VisionModelsSection,
   type VisionModelsSectionInjected,
@@ -72,7 +70,7 @@ function buildState(
 }
 
 /**
- * Register the dictionaries, the plugins tab, and the settings section.
+ * Register the dictionaries and the settings section.
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'vision-plugin: dictionaries')
@@ -120,7 +118,6 @@ export function apply(ctx: ClientContext): void {
           await scope.set(field, draft.text)
         }
       }
-      await scope.load()
       drafts.clear()
     } catch (error: unknown) {
       failed = true
@@ -130,27 +127,6 @@ export function apply(ctx: ClientContext): void {
       saving = false
       publish()
     }
-  }
-
-  // --- Tab toggle ---
-  const onToggle = (): void => {
-    const snapshot = publishSnapshot()
-    if (snapshot.saving || !snapshot.writable) return
-    const current = snapshot.enabled
-    saving = true
-    failed = false
-    publish()
-    scope.set('enabled', !current)
-      .then(() => scope.load())
-      .catch((error: unknown) => {
-        failed = true
-        // eslint-disable-next-line no-console
-        console.error('vision-plugin: failed to toggle enabled state', error)
-      })
-      .finally(() => {
-        saving = false
-        publish()
-      })
   }
 
   // --- Section inject face ---
@@ -166,39 +142,6 @@ export function apply(ctx: ClientContext): void {
     discard: discardSection,
     save: saveSection,
   })
-
-  // --- Tab inject face ---
-  const tabInjected = (): VisionPluginsTabInjected => ({
-    hooks: {
-      enabled: {
-        getSnapshot: () => store.getSnapshot().enabled,
-        subscribe: (listener) => store.subscribe(listener),
-      },
-      saving: {
-        getSnapshot: () => store.getSnapshot().saving,
-        subscribe: (listener) => store.subscribe(listener),
-      },
-      failed: {
-        getSnapshot: () => store.getSnapshot().failed,
-        subscribe: (listener) => store.subscribe(listener),
-      },
-      writable: {
-        getSnapshot: () => store.getSnapshot().writable,
-        subscribe: (listener) => store.subscribe(listener),
-      },
-    },
-    t,
-    onToggle,
-  })
-
-  // --- Register tab ---
-  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab',
-    id: 'vision-plugin',
-    order: 100,
-    label: () => t('tab.label'),
-    inject: tabInjected,
-  }, VisionPluginsTab))
 
   // --- Register section ---
   ctx.slots.inject('settings.section', () => ctx.slots.register({

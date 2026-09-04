@@ -2,7 +2,7 @@
 
 DSH 图片识别插件 — 为 AI 会话添加图片理解能力。
 
-在设置的 **插件** 页面查看识别功能开关，在 **识图模型配置** 页面配置视觉模型的 Base URL、Model ID 和 API Key。
+在 **识图模型配置** 页面启用识别功能，并配置视觉模型的 Base URL、Model ID 和 API Key。
 
 ## 安装（通过 DSH 市场）
 1. 打开 DSH Web GUI → **设置 → 插件** → **市场**
@@ -16,7 +16,7 @@ dsh plugin add @lp181818/dsh-vision-plugin
 
 ## 效果展示
 
-### ① 插件配置页（设置 → 识图模型配置）
+### 插件配置页（设置 → 识图模型配置）
 
 <img src="./img/vision-plugin2.png" alt="识图模型配置面板" width="700" />
 
@@ -26,12 +26,6 @@ dsh plugin add @lp181818/dsh-vision-plugin
 - **Model ID** — 用于视觉任务的模型标识符
 - **密钥来源（变量名）** — 环境变量或凭证名，留空自动复用同路由已配置的密钥
 - **API Key** — 实际 API 密钥（敏感信息，妥善保管）
-
-### ② 插件列表页（设置 → 插件）
-
-<img src="./img/vision-plugin1.png" alt="插件列表中的图片识别功能卡片" width="700" />
-
-在「设置 → 插件」面板中，您可以看到「图片识别功能」卡片，展示插件的启停状态与基本信息。
 
 ## 支持的服务
 
@@ -144,9 +138,8 @@ pnpm build
 ## 技术原理
 
 1. 通过 **settings section 插槽**在设置页导航中注册「识图模型配置」页面
-2. 通过 **plugins tab 插槽**在插件列表注册「图片识别功能」卡片
-3. 使用 `SettingsScopeController` 绑定 `vision-plugin` 命名空间实现配置持久化
-4. 插件设置命名空间：`vision-plugin`（enabled、baseUrl、modelId、apiKey）
+2. 使用 `SettingsScopeController` 绑定 `vision-plugin` 命名空间实现配置持久化
+3. 插件设置命名空间：`vision-plugin`（enabled、baseUrl、modelId、apiKey）
 
 ## License
 

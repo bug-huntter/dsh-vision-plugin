@@ -2,9 +2,6 @@
  * Simplified Chinese dictionary for the vision plugin.
  */
 export const zh = {
-  'tab.label': '图片识别功能',
-  'tab.description': '启用或禁用 AI 的图片识别能力，并可配置识图模型',
-
   'section.nav': '识图模型配置',
   'section.title': '识图模型配置',
   'section.description': '配置图片识别所使用的视觉模型参数',
@@ -47,9 +44,6 @@ export const zh = {
 export type VisionPluginKey = keyof typeof zh
 
 export const en: Record<VisionPluginKey, string> = {
-  'tab.label': 'Image Recognition',
-  'tab.description': 'Enable or disable AI image recognition and configure the vision model',
-
   'section.nav': 'Vision Model Config',
   'section.title': 'Vision Model Configuration',
   'section.description': 'Configure vision model parameters for image recognition',
