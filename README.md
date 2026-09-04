@@ -1,8 +1,18 @@
-# @dsh/vision-plugin
+# dsh-vision-plugin
 
 DSH 图片识别插件 — 为 AI 会话添加图片理解能力。
 
 在设置的 **插件** 页面查看识别功能开关，在 **识图模型配置** 页面配置视觉模型的 Base URL、Model ID 和 API Key。
+
+## 安装（通过 DSH 市场）
+1. 打开 DSH Web GUI → **设置 → 插件** → **市场**
+2. 添加仓库源 `https://github.com/bug-huntter/dsh-vision-plugin`
+3. 扫描并安装
+
+## 手动安装
+```bash
+dsh plugin add dsh-vision-plugin
+```
 
 ## 效果展示
 
@@ -48,16 +58,8 @@ DSH 图片识别插件 — 为 AI 会话添加图片理解能力。
 #### 1. 安装插件包
 
 ```bash
-# 选项 A：从 npm registry 安装（推荐）
-dsh plugin add @dsh/vision-plugin
-
-# 选项 B：从本地路径安装
-cd /path/to/vision-plugin
-npm pack   # 生成 .tgz 包
-dsh plugin add file:./deepseek-vision-plugin-0.1.0.tgz
-
-# 选项 C：从 Git 仓库安装
-dsh plugin add github:your-org/dsh-vision-plugin
+# 从 npm registry 安装（推荐）
+dsh plugin add dsh-vision-plugin
 ```
 
 #### 2. 启动/重启 DSH Web

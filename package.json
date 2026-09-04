@@ -1,7 +1,7 @@
 {
-  "name": "@dsh/vision-plugin",
+  "name": "dsh-vision-plugin",
   "description": "DSH vision/image-recognition plugin: enables AI to understand images with a configurable vision model",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "publishConfig": {
     "access": "public"
   },
@@ -37,6 +37,14 @@
     "prepublishOnly": "node build.mjs"
   },
   "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "vision",
+    "image",
+    "llm"
+  ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-api-remotes": "*",
@@ -60,10 +68,17 @@
     "lib/client.js",
     "lib/client.js.map",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/dsh-vision-plugin.git"
-  }
+    "url": "git+https://github.com/bug-huntter/dsh-vision-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bug-huntter/dsh-vision-plugin/issues"
+  },
+  "homepage": "https://github.com/bug-huntter/dsh-vision-plugin#readme",
+  "author": "bug-huntter",
+  "funding": "https://github.com/sponsors/bug-huntter"
 }

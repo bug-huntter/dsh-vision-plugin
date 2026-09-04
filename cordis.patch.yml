@@ -6,4 +6,4 @@
 # package.json makes the browser half load in the web GUI.
 - insert:
     - id: vision-plugin
-      name: '@dsh/vision-plugin'
+      name: 'dsh-vision-plugin'

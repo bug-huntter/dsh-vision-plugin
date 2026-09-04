@@ -9,7 +9,7 @@
  *
  * Usage: node sync.mjs   (run after `node build.mjs`)
  */
-import { copyFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +18,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ARTIFACTS = ['index.js', 'client.js', 'client.js.map']
 const PLUGIN_DIR = resolve(__dirname)
 const PROFILES_ROOT = join(homedir(), '.dsh', 'profiles')
+const packageJson = JSON.parse(readFileSync(join(PLUGIN_DIR, 'package.json'), 'utf8'))
+const PACKAGE_NAME = packageJson.name
+
+function packagePath(root, packageName) {
+  return join(root, 'node_modules', ...packageName.split('/'))
+}
 
 /** Files/directories that should never be copied into a profile copy. */
 const DENY_LIST = new Set([
@@ -50,8 +56,15 @@ function copyRecursive(src, dst) {
 
 let synced = 0
 for (const profile of profiles) {
-  const target = join(PROFILES_ROOT, profile, 'node_modules', '@dsh', 'vision-plugin')
-  if (!existsSync(target)) continue
+  const profileRoot = join(PROFILES_ROOT, profile)
+  const target = packagePath(profileRoot, PACKAGE_NAME)
+  if (!existsSync(target)) {
+    const legacyTarget = packagePath(profileRoot, '@dsh/vision-plugin')
+    if (existsSync(legacyTarget)) {
+      console.log(`profile "${profile}" has legacy @dsh/vision-plugin; reinstall ${PACKAGE_NAME} before syncing`)
+    }
+    continue
+  }
 
   // 1) Mirror all source/metadata files (src/, package.json, cordis.patch.yml, README, …)
   //    so any build/HMR path that reads src/ or package.json sees the latest workspace.

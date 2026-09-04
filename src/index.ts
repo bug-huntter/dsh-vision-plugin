@@ -74,7 +74,16 @@ function withImage(modalities: readonly Modality[] | undefined): Modality[] | un
 }
 
 function errorMessage(value: unknown): string {
-  return value instanceof Error ? value.message : String(value)
+  if (!(value instanceof Error)) return String(value)
+  const cause = value.cause as { code?: unknown; errno?: unknown; syscall?: unknown; address?: unknown; port?: unknown } | undefined
+  const causeParts = cause === undefined ? [] : [
+    typeof cause.code === 'string' ? `code=${cause.code}` : undefined,
+    typeof cause.errno === 'string' || typeof cause.errno === 'number' ? `errno=${cause.errno}` : undefined,
+    typeof cause.syscall === 'string' ? `syscall=${cause.syscall}` : undefined,
+    typeof cause.address === 'string' ? `address=${cause.address}` : undefined,
+    typeof cause.port === 'number' ? `port=${cause.port}` : undefined,
+  ].filter((part): part is string => part !== undefined)
+  return causeParts.length === 0 ? value.message : `${value.message} (${causeParts.join(', ')})`
 }
 
 function messageHasImage(content: readonly ContentBlock[]): boolean {
@@ -235,23 +244,28 @@ async function transcribeImage(
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: settings.modelId,
-        max_tokens: 4096,
-        temperature: 0,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image_url', image_url: { url: dataUrl } },
-            { type: 'text', text: settings.prompt?.trim() !== '' ? settings.prompt.trim() : DEFAULT_TRANSCRIBE_PROMPT },
-          ],
-        }],
-      }),
-      signal: wire,
-    })
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: settings.modelId,
+          max_tokens: 4096,
+          temperature: 0,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: dataUrl } },
+              { type: 'text', text: settings.prompt?.trim() !== '' ? settings.prompt.trim() : DEFAULT_TRANSCRIBE_PROMPT },
+            ],
+          }],
+        }),
+        signal: wire,
+      })
+    } catch (error: unknown) {
+      throw new Error(`vision model fetch failed for ${url}: ${errorMessage(error)}`, { cause: error })
+    }
     const body = await response.text()
     if (!response.ok) {
       throw new Error(`vision model request failed with HTTP ${response.status}: ${body.slice(0, 300)}`)
@@ -450,7 +464,6 @@ export function apply(ctx: Context): void {
 }
 
 export { VISION_PLUGIN_NAMESPACE }
-
 
 
 

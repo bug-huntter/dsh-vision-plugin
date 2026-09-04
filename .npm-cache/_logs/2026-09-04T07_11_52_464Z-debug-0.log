@@ -1,0 +1,40 @@
+0 verbose cli D:\nodejs\node.exe D:\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.9.8
+2 info using node@v22.23.2
+3 silly config load:file:D:\nvm\v22.23.2\node_modules\npm\npmrc
+4 silly config load:file:D:\code_files\my_achivements\@dsh\vision-plugin\.npmrc
+5 silly config load:file:C:\Users\25366\.npmrc
+6 silly config load:file:D:\nodejs.node_node_cache\etc\npmrc
+7 verbose title npm pack
+8 verbose argv "--cache" ".npm-cache" "pack" "--dry-run" "--ignore-scripts"
+9 verbose logfile logs-max:10 dir:D:\code_files\my_achivements\@dsh\vision-plugin\.npm-cache\_logs\2026-09-04T07_11_52_464Z-
+10 verbose logfile D:\code_files\my_achivements\@dsh\vision-plugin\.npm-cache\_logs\2026-09-04T07_11_52_464Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4345298944 maxSize:1086324736 maxEntrySize:543162368
+13 http fetch GET https://registry.npmmirror.com/npm attempt 1 failed with EACCES
+14 notice
+15 notice 📦  dsh-vision-plugin@1.0.0
+16 notice Tarball Contents
+17 notice 1.1kB LICENSE
+17 notice 6.1kB README.md
+17 notice 430B cordis.patch.yml
+17 notice 24.2kB lib/client.js
+17 notice 40.1kB lib/client.js.map
+17 notice 11.7kB lib/index.js
+17 notice 2.2kB package.json
+18 notice Tarball Details
+19 notice name: dsh-vision-plugin
+20 notice version: 1.0.0
+21 notice filename: dsh-vision-plugin-1.0.0.tgz
+22 notice package size: 22.8 kB
+23 notice unpacked size: 85.8 kB
+24 notice shasum: 03b41f82130abba35addd449fcda947eb40fbf52
+25 notice integrity: sha512-6+A1AFstCzBah[...]tnj4+5o7WJrYw==
+26 notice total files: 7
+27 notice
+28 verbose cwd D:\code_files\my_achivements\@dsh\vision-plugin
+29 verbose os Windows_NT 10.0.26100
+30 verbose node v22.23.2
+31 verbose npm  v10.9.8
+32 verbose exit 0
+33 info ok
