@@ -1,7 +1,7 @@
 {
   "name": "@lp181818/dsh-vision-plugin",
   "description": "DSH vision/image-recognition plugin: enables AI to understand images with a configurable vision model",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
