@@ -1,7 +1,7 @@
 {
   "name": "@lp181818/dsh-vision-plugin",
   "description": "DSH vision/image-recognition plugin: enables AI to understand images with a configurable vision model",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -23,9 +23,9 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-api-remotes"
       ],
@@ -48,15 +48,8 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-api-remotes": "*",
-    "@deepseek-ai/dsh-client-connection": "*",
     "@deepseek-ai/dsh-client-locale": "*",
-    "@deepseek-ai/dsh-client-runtime": "*",
-    "@deepseek-ai/dsh-client-ui-primitives": "*",
     "@deepseek-ai/dsh-client-ui-settings": "*",
-    "@deepseek-ai/dsh-client-ui-slots": "*",
-    "@deepseek-ai/dsh-client-web-react": "*",
-    "@deepseek-ai/dsh-invariants": "*",
     "@deepseek-ai/dsh-settings": "*",
     "@deepseek-ai/schemastery": "*",
     "react": "^18.0.0"

@@ -20,7 +20,6 @@
  * a model that natively declares multimodal input passes images through as-is.
  */
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { symbols } from '@deepseek-ai/cordis'
 import type {
   ContentBlock,
@@ -30,7 +29,8 @@ import type {
   Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { Context, SettingsScope } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
+import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import { VISION_PLUGIN_NAMESPACE } from './constants.ts'
 
 export interface VisionPluginSettings {
@@ -429,7 +429,7 @@ export function apply(ctx: Context): void {
   // patching phase never tears down the settings scope that the UI needs.
   let scope: SettingsScope<VisionPluginSettings> | undefined
   ctx.inject(['settings'], (settingsCtx) => {
-    scope = settingsCtx.settings.register(settingsNamespace(VISION_PLUGIN_NAMESPACE), VisionPluginSettingsSchema)
+    scope = settingsCtx.settings.register(VISION_PLUGIN_NAMESPACE, VisionPluginSettingsSchema)
   })
 
   // Image pipeline: needs settings (for the registered scope), llm, and the

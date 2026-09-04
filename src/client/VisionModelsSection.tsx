@@ -5,10 +5,7 @@
  * Uses inline styles only (no CSS module imports) to avoid build complexity
  * with esbuild / standalone bundling.
  */
-import { useId, type ReactNode } from 'react'
-import type {
-  HostObservable, InjectFace, PropsRuntime,
-} from '@deepseek-ai/dsh-client-ui-slots'
+import { useId, useSyncExternalStore, type ReactNode } from 'react'
 import type { VisionPluginKey } from './locales.ts'
 
 /** The projected state the section renders from. */
@@ -25,10 +22,11 @@ export interface VisionModelsSectionState {
   failed: boolean
 }
 
-/** Injected business face. */
+/** Injected business face: the section's own observable store plus actions. */
 export interface VisionModelsSectionInjected {
-  hooks: {
-    settings: HostObservable<VisionModelsSectionState>
+  store: {
+    getSnapshot(): VisionModelsSectionState
+    subscribe(listener: () => void): () => void
   }
   t: (key: VisionPluginKey) => string
   edit: (field: string, text: string) => void
@@ -37,9 +35,7 @@ export interface VisionModelsSectionInjected {
 }
 
 /** Composed component props. */
-export type VisionModelsSectionProps =
-  PropsRuntime<'settings.section'>
-  & InjectFace<VisionModelsSectionInjected>
+export type VisionModelsSectionProps = VisionModelsSectionInjected
 
 /** Shared inline style objects. */
 const s = {
@@ -103,8 +99,8 @@ function btn(base: Record<string, string | number>, disabled: boolean): Record<s
  * Render the vision model configuration page content column.
  */
 export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode {
-  const { t, useSettings, edit, discard, save } = props
-  const state = useSettings(s => s)
+  const { store, t, edit, discard, save } = props
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const fieldId = useId()
 
   if (state.status !== 'ready') {

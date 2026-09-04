@@ -42,9 +42,20 @@ dsh plugin add @lp181818/dsh-vision-plugin
 
 ## 安装
 
+### DSH 版本兼容
+
+| DSH 版本 | 兼容性 |
+| --- | --- |
+| `0.1.2-rc.1` 及同代 0.1.2 rc | 已适配（当前本机验证版本） |
+| `0.1.0-rc.7` 至 0.1.2-alpha 之前 | 使用相同的 `settings.register` 服务 API，理论兼容，建议实际验证 |
+| `0.1.0-rc.7` 之前 / 0.0.x | 不支持，当时尚无插件所需的 settings/section 机制 |
+
+> `v1.0.3` 起不再引用已移除的 `settingsNamespace` 和 `@deepseek-ai/dsh-client-runtime`，
+> 改用当前 DSH 的 `settings.register(ns, schema)` 与 `ctx.settingsScope` 服务。
+
 ### 前置条件
 
-- 已安装 [DSH](https://github.com/deepseek-ai/dsh)（版本 ≥ rc.7）
+- 已安装 [DSH](https://github.com/deepseek-ai/dsh)（推荐 `0.1.2-rc.1`，最低理论版本 `0.1.0-rc.7`）
 - 可用的视觉模型 API 端点（如 OpenRouter、OpenAI-compatible 服务）
 
 ### 步骤
