@@ -24,8 +24,12 @@ dsh plugin add @lp181818/dsh-vision-plugin
 - **启用图片识别** — 主开关，开启后 AI 可以识别并理解用户上传的图片内容
 - **Base URL** — 视觉模型 API 的基础地址
 - **Model ID** — 用于视觉任务的模型标识符
+- **备用模型（可选）** — 主模型在重试耗尽后仍遇 429/5xx 限流时自动切换的备用模型；聚合平台（OpenRouter/ARK）常因上游限流，建议填一个备选（如 `qwen/qwen3.8-flash`）
+- **重试次数** — 遇到 429 限流、5xx 或网络错误时的指数退避重试次数（0–10，默认 3），会遵循服务端 `Retry-After` 头
 - **密钥来源（变量名）** — 环境变量或凭证名，留空自动复用同路由已配置的密钥
 - **API Key** — 实际 API 密钥（敏感信息，妥善保管）
+
+> **保存前自动测试**：点击保存时，插件会用**当前填写的内容**在浏览器里向视觉模型发一张内嵌测试图，验证连通性与图片输入支持。只有配置类错误（地址/模型错误、密钥无效、模型不支持图片）才阻止保存；429/5xx 等临时限流仍可保存，不会把你锁在设置页外。
 
 ## 支持的服务
 
@@ -39,6 +43,28 @@ dsh plugin add @lp181818/dsh-vision-plugin
 | 本地 / 自建 OpenAI 兼容网关 | `http://<host>:<port>/v1` | 服务端已部署的模型 ID |
 
 > 用聚合平台（OpenRouter / ARK）时，模型名需使用该平台登记的完整标识符；`baseUrl` 填到**不含** `/chat/completions` 的根地址，插件会自动拼接。
+
+## v1.1.0 可靠性改进
+
+针对 **OpenRouter 等聚合平台上游限流（HTTP 429）** 导致的识图失败：
+
+- **指数退避重试**：429 / 5xx / 网络错误自动重试（默认 3 次），间隔指数递增并加抖动，且优先遵循服务端 `Retry-After` 头；单次请求超时可配（`timeoutMs`，默认 120 秒）
+- **备用模型切换**：主模型重试耗尽仍失败时，自动改用「备用模型」再尝试一轮
+- **清晰的错误提示**：请求未携带 API Key 时（401/403/429），错误信息会附带中文提示，指到「设置 → 识图模型配置 → API Key 字段」
+- **不再污染对话**：转写失败不再以错误块终止整轮会话；图片会被替换成一条「图片转写失败」的文本占位，对话继续正常流式回复，错误细节仅写入插件日志
+- **保存前连通性测试**：设置页在保存前用当前草稿配置实测「连通性 + 图片输入支持」，配置类错误阻止保存，临时限流仅告警
+
+新增可配置项（均可写在 `~/.dsh/settings.yaml` 的 `vision-plugin` 段，重启不丢）：
+
+```yaml
+vision-plugin:
+  enabled: true
+  baseUrl: https://openrouter.ai/api/v1
+  modelId: qwen/qwen3.8-27b
+  fallbackModelId: qwen/qwen3.8-flash   # 可选：备用模型
+  maxRetries: 3                          # 可选：0-10，默认 3
+  apiKey: sk-or-v1-...                   # 或通过 apiKeyEnv / 路由复用解析
+
 
 ## 安装
 
@@ -149,8 +175,10 @@ pnpm build
 ## 技术原理
 
 1. 通过 **settings section 插槽**在设置页导航中注册「识图模型配置」页面
-2. 使用 `SettingsScopeController` 绑定 `vision-plugin` 命名空间实现配置持久化
-3. 插件设置命名空间：`vision-plugin`（enabled、baseUrl、modelId、apiKey）
+2. 使用 `SettingsScopeController` 绑定 `vision-plugin` 命名空间实现配置持久化（写入 `~/.dsh/settings.yaml`，重启不丢）
+3. 插件设置命名空间：`vision-plugin`（enabled、baseUrl、modelId、fallbackModelId、maxRetries、timeoutMs、apiKey、apiKeyEnv）
+4. 识图请求在服务端用 **OpenAI 兼容** `POST {baseUrl}/chat/completions` 完成，带指数退避重试与备用模型切换
+5. 设置页的「测试连接」与保存前自动测试在**浏览器端**执行（无需主机 RPC，跨 DSH 版本可用）
 
 ## License
 

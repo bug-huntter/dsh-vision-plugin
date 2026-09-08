@@ -48,6 +48,18 @@ export interface VisionPluginSettings {
   prompt?: string
   /** Transcription request timeout in milliseconds. */
   timeoutMs?: number
+  /**
+   * Exponential-backoff retry count for transient failures (HTTP 429 / 5xx /
+   * network errors). Default 3, clamped to 0..10.
+   */
+  maxRetries?: number
+  /**
+   * Optional fallback model id. When the primary model keeps failing with
+   * transient errors (429 / 5xx) after `maxRetries`, one final attempt is made
+   * with this model (e.g. an aggregator's free tier getting rate-limited is a
+   * common reason to set this). Empty means no fallback.
+   */
+  fallbackModelId?: string
 }
 
 const VisionPluginSettingsSchema: z<VisionPluginSettings> = z.object({
@@ -58,7 +70,16 @@ const VisionPluginSettingsSchema: z<VisionPluginSettings> = z.object({
   apiKeyEnv: z.string().default(''),
   prompt: z.string().default(''),
   timeoutMs: z.number().default(120000),
+  maxRetries: z.number().min(0).default(3),
+  fallbackModelId: z.string().default(''),
 })
+
+/** Base delay (ms) for the first exponential-backoff wait on a transient error. */
+const RETRY_BASE_DELAY_MS = 1000
+/** Upper bound (ms) for any single retry wait, also used to cap Retry-After. */
+const RETRY_MAX_DELAY_MS = 30_000
+/** Upper bound for the configurable retry count. */
+const RETRY_COUNT_CAP = 10
 
 const DEFAULT_TRANSCRIBE_PROMPT =
   'Transcribe and describe this image faithfully. Include all visible text verbatim (OCR). '
@@ -228,6 +249,69 @@ async function resolveVisionKey(
   }
   return settings.apiKey
 }
+/** Error carrying the HTTP status (and Retry-After) of a failed transcription request. */
+interface VisionHttpError extends Error {
+  status?: number
+  retryAfterSeconds?: number
+}
+
+function visionHttpError(status: number, body: string, retryAfterSeconds?: number): VisionHttpError {
+  const error = new Error(`vision model request failed with HTTP ${status}: ${body.slice(0, 300)}`) as VisionHttpError
+  error.status = status
+  if (retryAfterSeconds !== undefined) error.retryAfterSeconds = retryAfterSeconds
+  return error
+}
+
+/** Transient statuses worth retrying: 429 (rate limited) and 5xx (upstream). */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500
+}
+
+/** Whether `error` is the per-request timeout abort (as opposed to the caller's own abort). */
+function isAbortSignalError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+/** Parse a `Retry-After` header (seconds form; HTTP-date form falls back to undefined). */
+function parseRetryAfterSeconds(header: string | null): number | undefined {
+  if (header === null) return undefined
+  const seconds = Number(header)
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined
+}
+
+/** Compute the wait before the next attempt: Retry-After when present, else exponential backoff + jitter. */
+function retryDelayMs(error: unknown, attempt: number): number {
+  const retryAfter = (error as { retryAfterSeconds?: number })?.retryAfterSeconds
+  if (typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.min(retryAfter * 1000, RETRY_MAX_DELAY_MS)
+  }
+  const base = RETRY_BASE_DELAY_MS * 2 ** Math.min(attempt, 6)
+  return Math.min(base + Math.floor(Math.random() * base * 0.25), RETRY_MAX_DELAY_MS)
+}
+
+/** Abortable sleep used between attempts. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted === true) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    void timer.unref?.()
+  })
+}
+
+/**
+ * Transcribe one image through the configured vision model (OpenAI-compatible
+ * `POST {baseUrl}/chat/completions`). Transient failures — HTTP 429 / 5xx and
+ * network errors — are retried with exponential backoff (honoring
+ * `Retry-After`) up to `settings.maxRetries` times; when a `fallbackModelId`
+ * is configured and the primary model still fails transiently, one final
+ * attempt is made with the fallback model. The caller's abort signal is
+ * honored at every step.
+ */
 async function transcribeImage(
   data: Uint8Array,
   mediaType: string,
@@ -236,52 +320,101 @@ async function transcribeImage(
   signal: AbortSignal | undefined,
 ): Promise<string> {
   const base = settings.baseUrl.replace(/\/+$/, '')
+  if (base.length === 0) {
+    throw new Error('vision-plugin: no Base URL configured — set it in 设置 → 识图模型配置')
+  }
+  const primary = settings.modelId.trim()
+  if (primary.length === 0) {
+    throw new Error('vision-plugin: no Model ID configured — set it in 设置 → 识图模型配置')
+  }
+  const fallback = settings.fallbackModelId?.trim() ?? ''
+  const models = fallback.length > 0 ? [primary, fallback] : [primary]
   const url = `${base}/chat/completions`
   const dataUrl = `data:${mediaType};base64,${Buffer.from(data).toString('base64')}`
-  const timeoutController = new AbortController()
-  const timeout = setTimeout(() => timeoutController.abort(), settings.timeoutMs ?? 120000)
-  const wire = signal === undefined ? timeoutController.signal : AbortSignal.any([timeoutController.signal, signal])
-  try {
-    const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`
-    let response: Response
+  const maxRetries = Math.max(0, Math.min(Math.floor(settings.maxRetries ?? 3), RETRY_COUNT_CAP))
+
+  const attemptOnce = async (model: string): Promise<string> => {
+    const timeoutController = new AbortController()
+    const timeout = setTimeout(() => timeoutController.abort(), settings.timeoutMs ?? 120000)
+    const wire = signal === undefined ? timeoutController.signal : AbortSignal.any([timeoutController.signal, signal])
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: settings.modelId,
-          max_tokens: 4096,
-          temperature: 0,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image_url', image_url: { url: dataUrl } },
-              { type: 'text', text: settings.prompt?.trim() !== '' ? settings.prompt.trim() : DEFAULT_TRANSCRIBE_PROMPT },
-            ],
-          }],
-        }),
-        signal: wire,
-      })
-    } catch (error: unknown) {
-      throw new Error(`vision model fetch failed for ${url}: ${errorMessage(error)}`, { cause: error })
+      const headers: Record<string, string> = { 'content-type': 'application/json' }
+      if (apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`
+      let response: Response
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model,
+            max_tokens: 4096,
+            temperature: 0,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image_url', image_url: { url: dataUrl } },
+                { type: 'text', text: settings.prompt?.trim() !== '' ? settings.prompt.trim() : DEFAULT_TRANSCRIBE_PROMPT },
+              ],
+            }],
+          }),
+          signal: wire,
+        })
+      } catch (error: unknown) {
+        if (signal?.aborted === true) throw error
+        if (isAbortSignalError(error)) {
+          // Per-attempt timeout: turn it into an ordinary transient error so
+          // the retry loop can decide, instead of surfacing an AbortError.
+          throw new Error(`vision model request timed out after ${settings.timeoutMs ?? 120000}ms`, { cause: error })
+        }
+        throw new Error(`vision model fetch failed for ${url}: ${errorMessage(error)}`, { cause: error })
+      }
+      const body = await response.text()
+      if (!response.ok) {
+        throw visionHttpError(response.status, body, parseRetryAfterSeconds(response.headers.get('retry-after')))
+      }
+      const parsed: unknown = JSON.parse(body)
+      const content: unknown = (parsed as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]?.message?.content
+      const text = typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.map((part) => (part as { text?: unknown })?.text ?? '').join('')
+          : ''
+      if (text.trim().length === 0) throw new Error('vision model returned an empty transcription')
+      return text.trim()
+    } finally {
+      clearTimeout(timeout)
     }
-    const body = await response.text()
-    if (!response.ok) {
-      throw new Error(`vision model request failed with HTTP ${response.status}: ${body.slice(0, 300)}`)
-    }
-    const parsed: unknown = JSON.parse(body)
-    const content: unknown = (parsed as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]?.message?.content
-    const text = typeof content === 'string'
-      ? content
-      : Array.isArray(content)
-        ? content.map((part) => (part as { text?: unknown })?.text ?? '').join('')
-        : ''
-    if (text.trim().length === 0) throw new Error('vision model returned an empty transcription')
-    return text.trim()
-  } finally {
-    clearTimeout(timeout)
   }
+
+  const noKeyHint = (status: number | undefined): string =>
+    apiKey.length === 0 && (status === 401 || status === 403 || status === 429)
+      ? '（提示：本次识图请求未携带 API Key——请在 设置 → 识图模型配置 的 API Key 字段填写，或配置可解析的密钥来源）'
+      : ''
+
+  let lastError: unknown
+  for (const model of models) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await attemptOnce(model)
+      } catch (error: unknown) {
+        if (signal?.aborted === true || isAbortSignalError(error)) throw error
+        lastError = error
+        const status = (error as VisionHttpError)?.status
+        const retryable = status === undefined ? true : isRetryableStatus(status)
+        if (!retryable) {
+          const hint = noKeyHint(status)
+          if (hint.length > 0) throw new Error(`${errorMessage(error)}${hint}`, { cause: error })
+          throw error
+        }
+        if (attempt === maxRetries) break // move to the fallback model, or fail finally
+        await sleep(retryDelayMs(error, attempt), signal)
+      }
+    }
+  }
+  const status = (lastError as VisionHttpError)?.status
+  const hint = noKeyHint(status)
+  if (hint.length > 0) throw new Error(`${errorMessage(lastError)}${hint}`, { cause: lastError })
+  throw lastError
 }
 
 /**
@@ -399,13 +532,27 @@ function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPlug
       })
       yield* stream({ ...options, messages: transformed }, prepared)
     } catch (error: unknown) {
-      yield {
-        type: 'finish',
-        reason: {
-          kind: 'error',
-          failure: { message: `vision-plugin: image transcription failed: ${errorMessage(error)}`, code: 'VISION_TRANSCRIBE_FAILED' },
-        },
+      // A caller abort (user stop / timeout upstream) must surface as an
+      // aborted finish, not as a transcription failure.
+      if (options.signal?.aborted === true) {
+        yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'aborted', code: 'ABORTED' } } }
+        return
       }
+      // Transcription failed: do NOT kill the whole turn. Replace every image
+      // block with a short text notice and stream the rewritten request, so
+      // the conversation continues and the (text-only) main model never
+      // receives raw image bytes it cannot handle. The failure is logged for
+      // diagnosis instead of aborting the conversation.
+      const logger = (ctx as { logger?: { error(message: string, ...args: unknown[]): void } }).logger
+      logger?.error(`vision-plugin: image transcription failed; continuing with a text placeholder: ${errorMessage(error)}`)
+      const notice = `[图片转写失败：${errorMessage(error).slice(0, 200)}——该图片未传递给模型]`
+      const messages = options.messages ?? []
+      const fallback: Message[] = messages.map((message) => {
+        if (message.role !== 'user') return message
+        const content = mapBlocksReplacingImages(message.content, () => notice)
+        return content === undefined ? message : { ...message, content }
+      })
+      yield* stream({ ...options, messages: fallback }, prepared)
     }
   } as (options: GenerateOptions, prepared?: unknown) => AsyncIterable<StreamChunk>
   ctx.effect(() => {

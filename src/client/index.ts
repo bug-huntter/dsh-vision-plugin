@@ -8,6 +8,7 @@
  */
 import { VISION_PLUGIN_NAMESPACE } from '../constants.ts'
 import type { VisionPluginSettings } from '../index.ts'
+import { testVisionConnection, type TestOutcome } from './testConnection.ts'
 import {
   VisionModelsSection,
   type VisionModelsSectionInjected,
@@ -95,11 +96,15 @@ function buildState(
   drafts: Map<string, DraftEntry>,
   saving: boolean,
   failed: boolean,
+  testing: boolean,
+  testResult: TestOutcome | null,
 ): VisionModelsSectionState {
   const value = scopeSnapshot.value
   const enabledDraft = drafts.get('enabled')
   const baseUrlDraft = drafts.get('baseUrl')
   const modelIdDraft = drafts.get('modelId')
+  const fallbackModelIdDraft = drafts.get('fallbackModelId')
+  const maxRetriesDraft = drafts.get('maxRetries')
   const apiKeyDraft = drafts.get('apiKey')
   const apiKeyEnvDraft = drafts.get('apiKeyEnv')
 
@@ -109,11 +114,15 @@ function buildState(
     enabled: enabledDraft !== undefined ? enabledDraft.text === 'true' : (value?.enabled ?? false),
     baseUrl: baseUrlDraft?.text ?? value?.baseUrl ?? '',
     modelId: modelIdDraft?.text ?? value?.modelId ?? '',
+    fallbackModelId: fallbackModelIdDraft?.text ?? value?.fallbackModelId ?? '',
+    maxRetries: maxRetriesDraft?.text ?? String(value?.maxRetries ?? 3),
     apiKey: apiKeyDraft?.text ?? value?.apiKey ?? '',
     apiKeyEnv: apiKeyEnvDraft?.text ?? value?.apiKeyEnv ?? '',
     dirty: Array.from(drafts.values()).some(d => d.dirty),
     saving,
     failed,
+    testing,
+    testResult,
   }
 }
 
@@ -139,12 +148,24 @@ export function apply(ctx: ClientContext): void {
     const drafts = new Map<string, DraftEntry>()
     let saving = false
     let failed = false
-    const store = createStore(buildState(scope.getSnapshot(), drafts, saving, failed))
+    let testing = false
+    let testResult: TestOutcome | null = null
+    const store = createStore(buildState(scope.getSnapshot(), drafts, saving, failed, testing, testResult))
     const publish = (): void => {
-      store.set(buildState(scope.getSnapshot(), drafts, saving, failed))
+      store.set(buildState(scope.getSnapshot(), drafts, saving, failed, testing, testResult))
     }
     const unsubscribeScope = scope.subscribe(publish)
     ctx.effect(() => () => unsubscribeScope(), 'vision-plugin: settings snapshot')
+
+    /** Current effective values: draft overrides on top of the saved snapshot. */
+    const draftValues = (): { baseUrl: string; modelId: string; apiKey: string } => {
+      const value = scope.getSnapshot().value
+      return {
+        baseUrl: drafts.get('baseUrl')?.text ?? value?.baseUrl ?? '',
+        modelId: drafts.get('modelId')?.text ?? value?.modelId ?? '',
+        apiKey: drafts.get('apiKey')?.text ?? value?.apiKey ?? '',
+      }
+    }
 
     const edit = (field: string, text: string): void => {
       drafts.set(field, { text, dirty: true })
@@ -158,8 +179,40 @@ export function apply(ctx: ClientContext): void {
       publish()
     }
 
+    /** Probe the vision endpoint with the current draft values (no persistence). */
+    const test = async (): Promise<void> => {
+      if (testing || saving) return
+      testing = true
+      testResult = null
+      publish()
+      try {
+        testResult = await testVisionConnection(draftValues())
+      } finally {
+        testing = false
+        publish()
+      }
+    }
+
     const save = async (): Promise<void> => {
       if (saving || !Array.from(drafts.values()).some(d => d.dirty)) return
+      // Connectivity / image-support gate: run the probe against the current
+      // drafts first. Hard configuration errors (bad base URL/model/key,
+      // unsupported image input) block the save; transient (429/5xx/timeout)
+      // and unverifiable (server-side key / CORS) outcomes warn but allow it.
+      // Skipped entirely when the plugin ends up disabled.
+      const willEnable = drafts.get('enabled') !== undefined
+        ? drafts.get('enabled')!.text === 'true'
+        : (scope.getSnapshot().value?.enabled ?? false)
+      if (willEnable) {
+        testing = true
+        testResult = null
+        publish()
+        const outcome = await testVisionConnection(draftValues())
+        testing = false
+        testResult = outcome
+        publish()
+        if (!outcome.canSave) return
+      }
       saving = true
       failed = false
       publish()
@@ -168,6 +221,9 @@ export function apply(ctx: ClientContext): void {
           if (!draft.dirty) continue
           if (field === 'enabled') {
             await scope.set('enabled', draft.text === 'true')
+          } else if (field === 'maxRetries') {
+            const parsed = Number(draft.text)
+            await scope.set('maxRetries', draft.text.trim() === '' || isNaN(parsed) ? 3 : parsed)
           } else {
             await scope.set(field, draft.text)
           }
@@ -188,6 +244,7 @@ export function apply(ctx: ClientContext): void {
       edit,
       discard,
       save,
+      test,
     })
 
     scoped.slots.inject('settings.section', () => scoped.slots.register({

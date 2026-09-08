@@ -20,6 +20,20 @@ export const zh = {
   'model.modelId.placeholder': 'gpt-4o-vision-preview',
   'model.modelId.description': '用于视觉任务的模型标识符',
 
+  'model.fallbackModelId': '备用模型（可选）',
+  'model.fallbackModelId.placeholder': 'qwen/qwen3.8-flash',
+  'model.fallbackModelId.description': '主模型遇 429 限流/5xx 且重试耗尽后自动切换的备用模型；留空则只使用主模型（OpenRouter 等聚合平台常因上游限流需要备用模型）',
+
+  'model.maxRetries': '重试次数',
+  'model.maxRetries.description': '遇到 429 限流、5xx 或网络错误时的指数退避重试次数（0–10，默认 3），会遵循服务端 Retry-After',
+
+  'test.button': '测试连接',
+  'test.testing': '正在测试连接…',
+  'test.hint': '保存前会自动用当前配置测试连通性与图片支持，也可点此手动测试。只有配置类错误（地址/模型错误、密钥无效、模型不支持图片）才阻止保存；429/5xx 等临时错误仍可保存。',
+  'test.ok': '测试通过',
+  'test.warn': '测试未完全通过（仍可保存）',
+  'test.blocked': '测试未通过，已阻止保存',
+
   'model.apiKey': 'API Key',
   'model.apiKey.placeholder': 'sk-xxxxxxxxxxxxxxxx',
   'model.apiKey.description': 'API 密钥（敏感信息，请妥善保管）',
@@ -61,6 +75,20 @@ export const en: Record<VisionPluginKey, string> = {
   'model.modelId': 'Model ID',
   'model.modelId.placeholder': 'gpt-4o-vision-preview',
   'model.modelId.description': 'Model identifier for vision tasks',
+
+  'model.fallbackModelId': 'Fallback Model (optional)',
+  'model.fallbackModelId.placeholder': 'qwen/qwen3.8-flash',
+  'model.fallbackModelId.description': 'Used when the primary model keeps failing with transient errors (429/5xx) after retries; empty means primary only (aggregators like OpenRouter often need a fallback due to upstream rate limits)',
+
+  'model.maxRetries': 'Retries',
+  'model.maxRetries.description': 'Exponential-backoff retries for 429 rate limits, 5xx or network errors (0-10, default 3); honors the server Retry-After header',
+
+  'test.button': 'Test connection',
+  'test.testing': 'Testing connection…',
+  'test.hint': 'A connectivity & image-support check runs automatically with the current draft config before saving; you can also run it manually here. Only real config errors (bad URL/model, invalid key, model without image support) block the save — transient 429/5xx still save.',
+  'test.ok': 'Test passed',
+  'test.warn': 'Test not fully passed (save still allowed)',
+  'test.blocked': 'Test failed — save blocked',
 
   'model.apiKey': 'API Key',
   'model.apiKey.placeholder': 'sk-xxxxxxxxxxxxxxxx',

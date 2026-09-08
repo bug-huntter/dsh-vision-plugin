@@ -7,6 +7,7 @@
  */
 import { useId, useSyncExternalStore, type ReactNode } from 'react'
 import type { VisionPluginKey } from './locales.ts'
+import type { TestOutcome } from './testConnection.ts'
 
 /** The projected state the section renders from. */
 export interface VisionModelsSectionState {
@@ -15,11 +16,15 @@ export interface VisionModelsSectionState {
   enabled: boolean
   baseUrl: string
   modelId: string
+  fallbackModelId: string
+  maxRetries: string
   apiKey: string
   apiKeyEnv: string
   dirty: boolean
   saving: boolean
   failed: boolean
+  testing: boolean
+  testResult: TestOutcome | null
 }
 
 /** Injected business face: the section's own observable store plus actions. */
@@ -32,6 +37,7 @@ export interface VisionModelsSectionInjected {
   edit: (field: string, text: string) => void
   discard: () => void
   save: () => void
+  test: () => Promise<void>
 }
 
 /** Composed component props. */
@@ -88,6 +94,19 @@ const s = {
     paddingTop: '16px', borderTop: '1px solid var(--dsw-alias-border-l2)', marginTop: '8px',
   },
   failed: { flex: 1, minWidth: 0, margin: 0, fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-error)' },
+  testRow: {
+    display: 'flex', alignItems: 'flex-start', gap: '10px', marginTop: '12px',
+    paddingTop: '12px', borderTop: '1px solid var(--dsw-alias-border-l2)',
+  } as Record<string, string | number>,
+  testBtn: {
+    flex: 'none', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '8px',
+    padding: '7px 14px', font: 'inherit', fontSize: '13px', cursor: 'pointer',
+    color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)',
+    transition: 'border-color 0.16s',
+  } as Record<string, string | number>,
+  testResult: { flex: 1, minWidth: 0, margin: 0, fontSize: '12px', lineHeight: 1.6, color: 'var(--dsw-alias-label-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+  testOk: { flex: 1, minWidth: 0, margin: 0, fontSize: '12px', lineHeight: 1.6, color: 'var(--dsw-alias-label-success, #2ea043)' },
+  testWarn: { flex: 1, minWidth: 0, margin: 0, fontSize: '12px', lineHeight: 1.6, color: 'var(--dsw-alias-label-warning, #b88700)' },
   disabled: { opacity: 0.4, cursor: 'default' } as Record<string, string | number>,
 }
 
@@ -99,7 +118,7 @@ function btn(base: Record<string, string | number>, disabled: boolean): Record<s
  * Render the vision model configuration page content column.
  */
 export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode {
-  const { store, t, edit, discard, save } = props
+  const { store, t, edit, discard, save, test } = props
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const fieldId = useId()
 
@@ -158,6 +177,26 @@ export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode 
         <p style={s.hint}>{t('model.modelId.description')}</p>
       </div>
 
+      {/* Fallback Model ID (optional) */}
+      <div style={s.field}>
+        <label style={s.label} htmlFor={`${fieldId}-fm`}>{t('model.fallbackModelId')}</label>
+        <input id={`${fieldId}-fm`} style={inputEnabled} type="text"
+          value={state.fallbackModelId} placeholder={t('model.fallbackModelId.placeholder')}
+          disabled={!state.writable}
+          onChange={(e) => { edit('fallbackModelId', e.target.value) }} />
+        <p style={s.hint}>{t('model.fallbackModelId.description')}</p>
+      </div>
+
+      {/* Retry count */}
+      <div style={s.field}>
+        <label style={s.label} htmlFor={`${fieldId}-mr`}>{t('model.maxRetries')}</label>
+        <input id={`${fieldId}-mr`} style={inputEnabled} type="number" min={0} max={10}
+          value={state.maxRetries} placeholder="3"
+          disabled={!state.writable}
+          onChange={(e) => { edit('maxRetries', e.target.value) }} />
+        <p style={s.hint}>{t('model.maxRetries.description')}</p>
+      </div>
+
       {/* API Key source (env / credential reference) */}
       <div style={s.field}>
         <label style={s.label} htmlFor={`${fieldId}-ake`}>{t('model.apiKeyEnv')}</label>
@@ -178,15 +217,32 @@ export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode 
         <p style={s.hint}>{t('model.apiKey.description')}</p>
       </div>
 
+      {/* Connectivity / image-support test (browser-side probe of the draft values) */}
+      <div style={s.testRow}>
+        <button type="button" style={btn(s.testBtn, dis || state.testing)} disabled={dis || state.testing}
+          onClick={() => void test()}>
+          {t('test.button')}
+        </button>
+        {state.testing
+          ? <p style={s.testResult}>{t('test.testing')}</p>
+          : state.testResult === null
+            ? <p style={s.testResult}>{t('test.hint')}</p>
+            : state.testResult.ok
+              ? <p style={s.testOk} role="status">{t('test.ok')}：{state.testResult.message}</p>
+              : state.testResult.canSave
+                ? <p style={s.testWarn} role="status">{t('test.warn')}：{state.testResult.message}</p>
+                : <p style={s.failed} role="status">{t('test.blocked')}：{state.testResult.message}</p>}
+      </div>
+
       {/* Actions */}
       <div style={s.footer}>
         {state.failed ? <p style={s.failed} role="status">{t('saveFailed')}</p> : null}
-        <button type="button" style={btn(s.discardBtn, !state.dirty || state.saving)}
-          disabled={!state.dirty || state.saving} onClick={discard}>
+        <button type="button" style={btn(s.discardBtn, !state.dirty || state.saving || state.testing)}
+          disabled={!state.dirty || state.saving || state.testing} onClick={discard}>
           {t('discard')}
         </button>
-        <button type="button" style={btn(s.saveBtn, !state.dirty || state.saving)}
-          disabled={!state.dirty || state.saving} onClick={save}>
+        <button type="button" style={btn(s.saveBtn, !state.dirty || state.saving || state.testing)}
+          disabled={!state.dirty || state.saving || state.testing} onClick={() => void save()}>
           {t(state.saving ? 'saving' : 'save')}
         </button>
       </div>
