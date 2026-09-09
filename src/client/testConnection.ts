@@ -45,16 +45,35 @@ function extractErrorMessage(body: string): string | undefined {
 
 async function readContent(body: string): Promise<string> {
   try {
-    const j = JSON.parse(body) as { choices?: { message?: { content?: unknown } }[] }
-    const c = j?.choices?.[0]?.message?.content
-    return typeof c === 'string'
-      ? c
-      : Array.isArray(c)
-        ? c.map((x) => (x as { text?: unknown })?.text ?? '').join('')
-        : ''
+    const j = JSON.parse(body) as { choices?: { message?: { content?: unknown; reasoning_content?: unknown } }[] }
+    const m = j?.choices?.[0]?.message
+    const parts: unknown[] = [m?.content, m?.reasoning_content].filter((v) => v !== undefined)
+    const render = (c: unknown): string =>
+      typeof c === 'string'
+        ? c
+        : Array.isArray(c)
+          ? c.map((x) => (x as { text?: unknown })?.text ?? '').join('')
+          : ''
+    return parts.map(render).join('\n').trim()
   } catch {
     return ''
   }
+}
+
+/**
+ * A 2xx from an OpenAI-compatible endpoint that received an image payload
+ * proves both connectivity and image acceptance — an unsupported model would
+ * answer 4xx/5xx, not 200. Reasoning models (e.g. glm-5-3-flash) and tiny
+ * `max_tokens` can legitimately yield an empty `content` (output lands in
+ * `reasoning_content`), so we never block the save on an empty completion.
+ */
+function apiKeyFormatHint(key: string): string {
+  const trimmed = key.trim()
+  const doubleQuoted = trimmed.length >= 2 && trimmed[0] === '"' && trimmed[trimmed.length - 1] === '"'
+  if (doubleQuoted || trimmed.includes('"') || /\s/.test(key)) {
+    return '（提示：API Key 似乎误带了引号或空格——粘贴时带入多余字符是鉴权失败的常见原因）'
+  }
+  return ''
 }
 
 /**
@@ -109,17 +128,21 @@ export async function testVisionConnection(values: TestValues, timeoutMs = 20000
   const status = response.status
   if (response.ok) {
     const content = await readContent(body)
-    if (content.trim().length === 0) {
-      return { ok: false, canSave: false, status, category: 'config', message: `HTTP ${status} 但返回内容为空——模型可能不支持图片输入或返回格式异常` }
-    }
-    return { ok: true, canSave: true, status, category: 'ok', message: `连接成功（HTTP ${status}），模型可接收图片` }
+    const empty = content.trim().length === 0
+    const note = empty
+      ? '（模型返回空内容——可能为推理型模型或输出被截断；HTTP 200 已证明连接与图片输入正常）'
+      : '，模型可接收图片'
+    return { ok: true, canSave: true, status, category: 'ok', message: `连接成功（HTTP ${status}）${note}` }
   }
   const message = extractErrorMessage(body) ?? `HTTP ${status}`
   if (status === 429 || status >= 500) {
     return { ok: false, canSave: true, status, category: 'transient', message: `${message}（临时限流/上游错误，配置本身通常有效）` }
   }
-  if ((status === 401 || status === 403) && values.apiKey.length === 0) {
-    return { ok: false, canSave: true, status, category: 'unverifiable', message: `${message}（密钥由服务端解析，浏览器无法验证鉴权；保存后实际使用时会按服务端解析的密钥鉴权）` }
+  if (status === 401 || status === 403) {
+    if (values.apiKey.length === 0) {
+      return { ok: false, canSave: true, status, category: 'unverifiable', message: `${message}（密钥由服务端解析，浏览器无法验证鉴权；保存后实际使用时会按服务端解析的密钥鉴权）` }
+    }
+    return { ok: false, canSave: false, status, category: 'config', message: `${message}${apiKeyFormatHint(values.apiKey)}` }
   }
   return { ok: false, canSave: false, status, category: 'config', message }
 }
