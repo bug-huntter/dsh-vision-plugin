@@ -5,12 +5,13 @@
  * third-party plugins (`dsh-api-remotes` only forwards a host→client event
  * allowlist), so this is the only mechanism that works across DSH versions.
  *
- * Caveat: a key the server resolves at request time (`apiKeyEnv`, or route
- * reuse as a last resort) cannot be reproduced here; auth-type failures with no
- * literal key are reported as "unverifiable" (save allowed with a warning)
- * instead of blocking the save. A non-empty API Key field, however, is exactly
- * what the server sends (v1.1.3+), so a pass/fail for it is representative.
+ * The key sent here is exactly the key the host sends: since v1.2.0 the API Key
+ * field is the ONLY key source (no `apiKeyEnv` indirection, no reuse of a route
+ * sharing the Base URL), and the same `authHeaders` mapping produces the
+ * request headers on both sides. A pass/fail here is therefore representative
+ * for the whole pipeline.
  */
+import { authHeaders, keyFormatHint, type KeyFormat } from '../authHeaders.ts'
 
 /** A small 32x32 solid PNG sent to the model to prove image input works. */
 const TEST_IMAGE_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAK0lEQVR4nO3OIQEAAAwEoetfeovxBoGnq1tKQEBAQEBAQEBAQEBAQEBgHXhUDfhqRFDd3gAAAABJRU5ErkJggg=='
@@ -32,6 +33,7 @@ export interface TestValues {
   baseUrl: string
   modelId: string
   apiKey: string
+  keyFormat: KeyFormat
 }
 
 function extractErrorMessage(body: string): string | undefined {
@@ -68,19 +70,12 @@ async function readContent(body: string): Promise<string> {
  * `max_tokens` can legitimately yield an empty `content` (output lands in
  * `reasoning_content`), so we never block the save on an empty completion.
  */
-function apiKeyFormatHint(key: string): string {
-  const trimmed = key.trim()
-  const doubleQuoted = trimmed.length >= 2 && trimmed[0] === '"' && trimmed[trimmed.length - 1] === '"'
-  if (doubleQuoted || trimmed.includes('"') || /\s/.test(key)) {
-    return '（提示：API Key 似乎误带了引号或空格——粘贴时带入多余字符是鉴权失败的常见原因）'
-  }
-  return ''
-}
 
 /**
  * Probe `POST {baseUrl}/chat/completions` with a tiny embedded image and a
- * "Reply with exactly: OK" prompt. A 2xx with non-empty content proves both
- * connectivity and image input support.
+ * "Reply with exactly: OK" prompt. A missing key is reported before any
+ * request is sent — it is the one failure the plugin can name exactly, and the
+ * same message the host uses when transcription finds no key.
  */
 export async function testVisionConnection(values: TestValues, timeoutMs = 20000): Promise<TestOutcome> {
   const base = values.baseUrl.replace(/\/+$/, '')
@@ -91,10 +86,18 @@ export async function testVisionConnection(values: TestValues, timeoutMs = 20000
   if (modelId.length === 0) {
     return { ok: false, canSave: false, status: 0, category: 'config', message: 'Model ID 为空' }
   }
+  if (values.apiKey.trim().length === 0) {
+    return {
+      ok: false, canSave: false, status: 0, category: 'config',
+      message: `未携带 API Key：请在「API Key」字段填写密钥（当前密钥格式：${values.keyFormat}）`,
+    }
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
-  if (values.apiKey.length > 0) headers.authorization = `Bearer ${values.apiKey}`
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...authHeaders(values.keyFormat, values.apiKey),
+  }
   let response: Response
   try {
     response = await fetch(`${base}/chat/completions`, {
@@ -140,10 +143,10 @@ export async function testVisionConnection(values: TestValues, timeoutMs = 20000
     return { ok: false, canSave: true, status, category: 'transient', message: `${message}（临时限流/上游错误，配置本身通常有效）` }
   }
   if (status === 401 || status === 403) {
-    if (values.apiKey.length === 0) {
-      return { ok: false, canSave: true, status, category: 'unverifiable', message: `${message}（密钥由服务端解析，浏览器无法验证鉴权；保存后实际使用时会按服务端解析的密钥鉴权）` }
+    return {
+      ok: false, canSave: false, status, category: 'config',
+      message: `${message}（已按「${values.keyFormat}」格式携带密钥但被拒绝——请确认 API Key 与「密钥格式」匹配、密钥有效且未欠费）${keyFormatHint(values.apiKey)}`,
     }
-    return { ok: false, canSave: false, status, category: 'config', message: `${message}${apiKeyFormatHint(values.apiKey)}` }
   }
   return { ok: false, canSave: false, status, category: 'config', message }
 }

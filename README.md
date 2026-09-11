@@ -26,14 +26,16 @@ dsh plugin add @lp181818/dsh-vision-plugin
 - **Model ID** — 用于视觉任务的模型标识符
 - **备用模型（可选）** — 主模型在重试耗尽后仍遇 429/5xx 限流时自动切换的备用模型；聚合平台（OpenRouter/ARK）常因上游限流，建议填一个备选（如 `qwen/qwen3.8-flash`）
 - **重试次数** — 遇到 429 限流、5xx 或网络错误时的指数退避重试次数（0–10，默认 3），会遵循服务端 `Retry-After` 头
-- **密钥来源（变量名）** — 环境变量或凭证名；留空则使用下面的 API Key 字段，两者都留空才自动复用同路由已配置的密钥（优先级：密钥来源 > API Key > 复用路由）
-- **API Key** — 实际 API 密钥（敏感信息，妥善保管）；填写后即用于识图请求，优先于路由复用
+- **API Key** — 实际 API 密钥（敏感信息，妥善保管）。**这是唯一的密钥来源**：留空时不会去复用其它路由的密钥，而是明确提示「未携带 API Key」（v1.2.0 起）
+- **密钥格式** — 密钥的鉴权方式，必须与密钥所属服务商匹配：`openai`（`Authorization: Bearer`，适用于 OpenAI / OpenRouter / ARK / DeepSeek 及多数兼容网关）、`anthropic`（`x-api-key` + `anthropic-version`）、`gemini`（`x-goog-api-key`）、`azure`（`api-key`）
 
 > **保存前自动测试**：点击保存时，插件会用**当前填写的内容**在浏览器里向视觉模型发一张内嵌测试图，验证连通性与图片输入支持。只有配置类错误（地址/模型错误、密钥无效、模型不支持图片）才阻止保存；429/5xx 等临时限流仍可保存，不会把你锁在设置页外。
 
+> **v1.2.0 起「密钥来源（变量名）」已移除**：那一栏实际填的是环境变量/凭证名，却容易被当成"密钥本身"，且它优先级高于 API Key，会出现「页面上明明填了 key，发图仍 401」。现在密钥只来自 API Key 字段；旧的 `apiKeyEnv` 配置会被忽略（不再生效）。
+
 ## 支持的服务
 
-插件内部只做一次标准的 **OpenAI 兼容** `POST {baseUrl}/chat/completions` 请求（`Authorization: Bearer <key>`），因此**不限于 OpenRouter**。任何提供 OpenAI 兼容 `/chat/completions` 接口的服务都可用：
+插件内部只做一次标准的 **OpenAI 兼容** `POST {baseUrl}/chat/completions` 请求；密钥通过「密钥格式」选择的方式携带（默认 `Authorization: Bearer <key>`），因此**不限于 OpenRouter**。任何提供 OpenAI 兼容 `/chat/completions` 接口的服务都可用：
 
 | 服务 | Base URL 示例 | 模型 ID 示例 |
 |---|---|---|
@@ -63,7 +65,7 @@ vision-plugin:
   modelId: qwen/qwen3.8-27b
   fallbackModelId: qwen/qwen3.8-flash   # 可选：备用模型
   maxRetries: 3                          # 可选：0-10，默认 3
-  apiKey: sk-or-v1-...                   # 或通过 apiKeyEnv / 路由复用解析
+  apiKey: sk-or-v1-...                   # v1.2.0 起密钥只来自此字段
 ```
 
 ## v1.1.3 密钥优先级修复
@@ -88,6 +90,8 @@ vision-plugin:
 - **回归测试**：`npm test` 运行 `test/key-resolution.test.mjs`，覆盖上述全部优先级场景（含本 bug 的复现场景）
 
 > 注意：设置页的「测试连接」在**浏览器里用当前填写的 key** 直接请求，而服务端运行时还会考虑 `apiKeyEnv` 与路由复用。v1.1.3 之后，只要 API Key 字段非空，两者就一致了；若你把 key 填进了「密钥来源（变量名）」字段（那是变量名，不是 key），浏览器测试无法复现服务端的解析结果。
+>
+> **v1.2.0 起该优先级表与这条注意已作废**：`apiKeyEnv` 字段与「复用同 Base URL 路由的密钥」都已移除，密钥只来自 API Key 字段——见下方 v1.2.0 一节。
 
 
 ## v1.1.4 保存静默失败修复
@@ -123,6 +127,47 @@ try {
 - **回归测试**：`test/commit-settings.test.mjs` 锁定上述行为，包括"被拒一次后重试成功"与"始终被拒时必须报错而非静默丢弃"两条
 
 > 遇到这个报错的用户：**刷新一次设置页**（Ctrl+R）即可让页面拿到最新版本栅栏；v1.1.4 之后即便再次遇到并发写入，也会自动重试或明确报错，而不会再默默丢掉你的输入。
+
+
+## v1.2.0 密钥来源收敛 + 密钥格式
+
+这一版按「密钥只有一个来源」重做了设置项，去掉了一个会静默换 key 的间接层，并把"没带 key"变成一句能照着做的提示。
+
+**改动**
+
+| 项目 | v1.1.4 及更早 | v1.2.0 |
+|---|---|---|
+| 密钥来源 | `apiKeyEnv`（环境变量/凭证名）> `apiKey` > 复用同 Base URL 路由的密钥 | **只有 `apiKey`**（设置页 API Key 字段） |
+| 「密钥来源（变量名）」栏 | 有 | **已移除**（旧的 `apiKeyEnv` 值被忽略） |
+| 路由复用 | 兜底生效，会静默换成别的路由的密钥 | **彻底移除**，绝不再替换你填的 key |
+| 密钥格式 | 无（固定 `Authorization: Bearer`） | **新增**：`openai` / `anthropic` / `gemini` / `azure` |
+| 未填 key 时 | 可能复用路由密钥，或收到上游那句看不懂的 401 | **发请求前就报「未携带 API Key」，并指明去哪个字段填** |
+| 401/403 提示 | 只提示"密钥来自路由复用" | 点名「已按 `<格式>` 携带密钥但被拒绝」，指向格式是否匹配 |
+| 保存前测试 | key 为空按"无法验证"放行保存 | key 为空直接阻止保存，并给出「未携带 API Key」 |
+
+**密钥格式一览**（端点始终是 `{baseUrl}/chat/completions`，只换鉴权头）
+
+| 格式 | 请求头 | 适用 |
+|---|---|---|
+| `openai`（默认） | `Authorization: Bearer <key>` | OpenAI、OpenRouter、火山方舟 ARK、DeepSeek 及多数兼容网关 |
+| `anthropic` | `x-api-key: <key>` + `anthropic-version: 2023-06-01` | Anthropic 风鉴权的网关 / 代理 |
+| `gemini` | `x-goog-api-key: <key>` | Google 风鉴权的网关 / 代理 |
+| `azure` | `api-key: <key>` | Azure OpenAI 风鉴权的网关 / 代理 |
+
+> 说明：本版只切换**鉴权请求头**，不切换端点与报文（选 `anthropic` 不会改走 `/v1/messages`，选 `gemini` 不会改走 `generateContent`）。要直连官方 Anthropic / Gemini 原生协议，仍需一个把它们转成 OpenAI 兼容格式的网关。
+
+**「未携带 API Key」提示长这样**
+
+```
+[图片转写失败：未携带 API Key：请在 设置 → 识图模型配置 的「API Key」字段填写密钥
+（当前密钥格式：openai，如与密钥不匹配请在同页切换）——该图片未传递给模型]
+```
+
+主机端在**发出请求之前**就判定并写日志，浏览器端「测试连接」用的是同一条提示，因此不会再出现"图没送到模型，却只给一句看不懂的 401"。
+
+**迁移**：升级后打开设置页，确认 **API Key** 已填、**密钥格式**与服务商匹配即可。旧行为等价于新版 `密钥格式 = openai`，OpenRouter / ARK / OpenAI 用户无需改动；`settings.yaml` 里遗留的 `apiKeyEnv` 会被忽略（可直接从配置文件中删掉）。
+
+**回归测试**：`test/key-resolution.test.mjs`（唯一来源）、`test/auth-headers.test.mjs`（四种格式的请求头、空 key 不发鉴权头、格式归一化）、`test/commit-settings.test.mjs`（保存写入结果判定）。
 
 
 ## 安装
@@ -165,9 +210,10 @@ pnpm dsh web
 1. 进入 **设置 → 识图模型配置**
 2. 填写 **Base URL**（如 `https://openrouter.ai/api/v1`）
 3. 填写 **Model ID**（如 `qwen/qwen3.8-27b`）
-4. **把密钥填到「API Key」字段**——不要把 key 填进「密钥来源（变量名）」字段（那是环境变量/凭证名，不是 key 本身）
-5. 开启 **启用图片识别** 开关
-6. 点击 **保存**
+4. **把密钥填到「API Key」字段**——这是唯一的密钥来源；留空会在发图时提示「未携带 API Key」
+5. 选择 **密钥格式**（OpenRouter / OpenAI / ARK / DeepSeek 等选 `openai`；密钥由 Anthropic 风网关签发时选 `anthropic`，其余按服务商选择）
+6. 开启 **启用图片识别** 开关
+7. 点击 **保存**
 
 **火山方舟 ARK 示例**（Agent Plan / Coding Plan 实测可用）：
 
@@ -176,7 +222,7 @@ pnpm dsh web
 | Base URL | `https://ark.cn-beijing.volces.com/api/plan/v3` |
 | Model ID | `Doubao-Seed-Evolving` |
 | API Key | `ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
-| 密钥来源（变量名） | 留空 |
+| 密钥格式 | `openai` |
 
 > **注意**：使用 OpenRouter 等聚合 API 时，模型名需使用该平台的完整标识符（如 `openai/gpt-4o-vision`、`qwen/qwen3.8-27b`）。
 
@@ -188,24 +234,27 @@ pnpm dsh web
 
 ### 报错 `401 The API key format is incorrect`（或 `AuthenticationError`、`Missing Authentication header`）
 
-**原因**：插件实际发给服务端的 key 不是当前填写的那一个。最常见的情况是——把 key 填进了 **「密钥来源（变量名）」** 字段，或**同 Base URL 的路由复用覆盖了 API Key 字段**（v1.1.2 及更早；见上文 v1.1.3）。插件按以下优先级取 key（v1.1.3 起）：
+**原因**：插件实际发给服务端的 key 不是当前填写的那一个，或者**发送方式与密钥不匹配**。
 
-1. `apiKeyEnv`（密钥来源/变量名）——填的是**变量名或凭证名**（如 `OPENROUTER_API_KEY`、`A2W_API_KEY`），不是 key 本身；解析失败则跳过
-2. 字面量 `apiKey`（**API Key** 字段）——显式填写即采用
-3. 复用同 Base URL 路由已注册的模型 key（`baseUrl` 需与某个已配置模型的路由完全一致）
+*历史成因（v1.1.2 及更早，已修复）*：同 Base URL 的路由复用覆盖了 API Key 字段——`settings.yaml` 里两个 provider 都写 `https://openrouter.ai/api/v1` 时，插件会取**注册顺序靠前那个路由**的密钥（见上文 v1.1.3）。
 
-若 1、2 均未命中而 `apiKey` 又为空，请求就会带一个旧/空 key 过去，被服务端以 401 拒绝。
+*现在的成因*（v1.2.0 起，密钥只来自 API Key 字段）：
 
-> 区分两种 401 文案：`No cookie auth credentials found` = 请求**根本没带** `Authorization` 头；`Missing Authentication header` = 带了头但**不是可用的 Bearer token**（空值、多余空格，或平台不认这把 key 的格式）。后者最常见的成因就是密钥被路由复用换成了别的平台的 key。
+1. **API Key 字段为空** → 现在会在发请求前直接提示「未携带 API Key」，不会走到上游 401
+2. **密钥格式选错** → 例如把 Anthropic 风鉴权的 key 按 `openai`（`Authorization: Bearer`）发送；请在同页「密钥格式」中改选对应项
+3. **key 本身无效/过期/欠费**，或粘贴时带入了引号
+4. 历史遗留：`settings.yaml` 里还留着 `apiKeyEnv`（v1.2.0 起**已被忽略**，不再是原因）
 
-**修复**：把 key 直接粘贴进 **API Key** 字段，`密钥来源（变量名）` 留空；保存后**刷新设置页**确认已生效。若你直接改 `~/.dsh/settings.yaml`，`vision-plugin` 段形如：
+> 区分两种 401 文案：`No cookie auth credentials found` = 请求**根本没带**鉴权头（现在意味着字段为空，会先被插件拦下）；`Missing Authentication header` = 带了头但**不是可用的凭据**（空值、多余空格，或平台不认这把 key 的格式/来源）。
+
+**修复**：把 key 直接粘贴进 **API Key** 字段，并在「密钥格式」中选择与密钥匹配的项；保存后**刷新设置页**确认已生效。若你直接改 `~/.dsh/settings.yaml`，`vision-plugin` 段形如：
 
 ```yaml
 vision-plugin:
-  apiKey: ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   # 或 sk-... / 其他格式
+  apiKey: ark-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   # 或 sk-or-v1-... / 其他格式
+  keyFormat: openai                                 # openai | anthropic | gemini | azure
   baseUrl: https://ark.cn-beijing.volces.com/api/plan/v3
   modelId: Doubao-Seed-Evolving
-  apiKeyEnv: ""
   enabled: true
 ```
 
@@ -224,8 +273,8 @@ pnpm install
 # 构建（node + client 两半产物）
 pnpm build
 
-# 回归测试：API Key 来源优先级 + 保存写入结果判定
-# （test/key-resolution.test.mjs、test/commit-settings.test.mjs）
+# 回归测试：密钥来源唯一性 + 密钥格式请求头 + 保存写入结果判定
+# （test/key-resolution.test.mjs、test/auth-headers.test.mjs、test/commit-settings.test.mjs）
 npm test
 
 # 把构建产物同步进本机所有已安装的 DSH profile
@@ -245,9 +294,10 @@ pnpm sync
 
 1. 通过 **settings section 插槽**在设置页导航中注册「识图模型配置」页面
 2. 使用 `SettingsScopeController` 绑定 `vision-plugin` 命名空间实现配置持久化（写入 `~/.dsh/settings.yaml`，重启不丢）
-3. 插件设置命名空间：`vision-plugin`（enabled、baseUrl、modelId、fallbackModelId、maxRetries、timeoutMs、apiKey、apiKeyEnv）
-4. 识图请求在服务端用 **OpenAI 兼容** `POST {baseUrl}/chat/completions` 完成，带指数退避重试与备用模型切换
+3. 插件设置命名空间：`vision-plugin`（enabled、baseUrl、modelId、fallbackModelId、maxRetries、timeoutMs、apiKey、keyFormat）
+4. 识图请求在服务端用 **OpenAI 兼容** `POST {baseUrl}/chat/completions` 完成（`src/authHeaders.ts` 按 `keyFormat` 组装鉴权头，两半共用同一函数），带指数退避重试与备用模型切换
 5. 设置页的「测试连接」与保存前自动测试在**浏览器端**执行（无需主机 RPC，跨 DSH 版本可用）
+6. 保存走一次原子 `mutate`，并**读回宿主已解析的 section 校验是否真的落盘**（被拒的写入在 DSH 契约里不抛异常，只能这样判定），失败则保留草稿并报错（`src/client/commitSettings.ts`）
 
 ## License
 

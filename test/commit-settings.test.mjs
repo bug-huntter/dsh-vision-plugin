@@ -188,6 +188,7 @@ const coercions = [
   ['maxRetries', 'abc', 3],
   ['apiKey', '  sk-or-v1-typed  ', '  sk-or-v1-typed  '],
   ['fallbackModelId', '', ''],
+  ['keyFormat', 'anthropic', 'anthropic'],
 ]
 
 let failed = 0

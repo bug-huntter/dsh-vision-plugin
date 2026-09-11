@@ -32,6 +32,7 @@ import type {
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import { VISION_PLUGIN_NAMESPACE } from './constants.ts'
+import { authHeaders, DEFAULT_KEY_FORMAT, normalizeKeyFormat, type KeyFormat } from './authHeaders.ts'
 import { resolveVisionKey, type VisionKeyResolution } from './keyResolution.ts'
 
 export interface VisionPluginSettings {
@@ -41,15 +42,19 @@ export interface VisionPluginSettings {
   baseUrl: string
   /** Model identifier to use for vision tasks. */
   modelId: string
-  /** API key for authenticating with the vision model provider (or a credential/env reference via apiKeyEnv). A literal key here beats reuse of a route sharing `baseUrl`. */
+  /**
+   * The API key used for image transcription — the ONLY key source (v1.2.0).
+   * An empty value is reported as `未携带 API Key`; it is never substituted by
+   * a credential belonging to another LLM route.
+   */
   apiKey: string
   /**
-   * Environment variable or credential reference holding the API key; wins over
-   * a literal `apiKey` when set and resolvable. Full priority order:
-   * `apiKeyEnv` > `apiKey` > reuse of the credential registered for a route
-   * whose Base URL matches `baseUrl`.
+   * How the API key is presented to the provider: `openai` (Authorization:
+   * Bearer — OpenAI, OpenRouter, ARK, DeepSeek and most compatible gateways),
+   * `anthropic` (x-api-key + anthropic-version), `gemini` (x-goog-api-key), or
+   * `azure` (api-key). Must match the key's own provider.
    */
-  apiKeyEnv: string
+  keyFormat: KeyFormat
   /** Optional override of the transcription instruction sent with each image. */
   prompt?: string
   /** Transcription request timeout in milliseconds. */
@@ -73,7 +78,10 @@ const VisionPluginSettingsSchema: z<VisionPluginSettings> = z.object({
   baseUrl: z.string().default(''),
   modelId: z.string().default(''),
   apiKey: z.string().default(''),
-  apiKeyEnv: z.string().default(''),
+  // A plain string, normalized at use: a hand-edited settings.yaml typo then
+  // degrades to the default instead of failing namespace validation (which
+  // would reject every later write with `settings/rejected`).
+  keyFormat: z.string().default(DEFAULT_KEY_FORMAT),
   prompt: z.string().default(''),
   timeoutMs: z.number().default(120000),
   maxRetries: z.number().min(0).default(3),
@@ -91,6 +99,16 @@ const DEFAULT_TRANSCRIBE_PROMPT =
   'Transcribe and describe this image faithfully. Include all visible text verbatim (OCR). '
   + 'Then briefly describe any other relevant content such as diagrams, charts, UI elements, people, or the scene. '
   + 'Reply with only the transcription and description, without preamble.'
+
+/**
+ * Notice used when no API key is configured. This is the one failure the plugin
+ * can name exactly, so it never sends an unauthenticated request (which would
+ * come back as a provider-specific 401 the user cannot act on).
+ */
+function missingKeyMessage(keyFormat: KeyFormat): string {
+  return `未携带 API Key：请在 设置 → 识图模型配置 的「API Key」字段填写密钥`
+    + `（当前密钥格式：${keyFormat}，如与密钥不匹配请在同页切换）`
+}
 
 const TRANSCRIPTION_PREFIX = '[Image transcription]'
 
@@ -279,6 +297,10 @@ async function transcribeImage(
   signal: AbortSignal | undefined,
 ): Promise<string> {
   const apiKey = resolution.key
+  const keyFormat = normalizeKeyFormat(settings.keyFormat)
+  // Fail fast, before any network I/O: with a single, visible key source there
+  // is nothing to guess, and the notice can name the exact field to fill.
+  if (apiKey.length === 0) throw new Error(missingKeyMessage(keyFormat))
   const base = settings.baseUrl.replace(/\/+$/, '')
   if (base.length === 0) {
     throw new Error('vision-plugin: no Base URL configured — set it in 设置 → 识图模型配置')
@@ -298,8 +320,10 @@ async function transcribeImage(
     const timeout = setTimeout(() => timeoutController.abort(), settings.timeoutMs ?? 120000)
     const wire = signal === undefined ? timeoutController.signal : AbortSignal.any([timeoutController.signal, signal])
     try {
-      const headers: Record<string, string> = { 'content-type': 'application/json' }
-      if (apiKey.length > 0) headers.authorization = `Bearer ${apiKey}`
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        ...authHeaders(keyFormat, apiKey),
+      }
       let response: Response
       try {
         response = await fetch(url, {
@@ -347,20 +371,15 @@ async function transcribeImage(
   }
 
   /**
-   * Hints for auth failures. An empty key points at the settings fields; a key
-   * that came from route reuse names the route that supplied it, because that
-   * reuse is only a fallback — a rejected request means the route's credential
-   * is not the one this Base URL needs, and filling the field overrides it.
+   * Hints for auth failures. An empty key never reaches the network (see the
+   * fail-fast above), so a 401/403 here means the key we sent was refused —
+   * which with a single visible key source points at the key itself or at a
+   * format mismatch between the key and the 「密钥格式」 field.
    */
   const authHint = (status: number | undefined): string => {
-    if (status !== 401 && status !== 403 && status !== 429) return ''
-    if (apiKey.length === 0) {
-      return '（提示：本次识图请求未携带 API Key——请在 设置 → 识图模型配置 的 API Key 字段填写，或配置可解析的密钥来源）'
-    }
-    if (resolution.source === 'route' && (status === 401 || status === 403)) {
-      return `（提示：本次识图请求复用了路由「${resolution.provider ?? '未知'}」已注册的密钥，被服务端拒绝——请在该配置页的 API Key 字段显式填写此视觉模型自己的密钥）`
-    }
-    return ''
+    if (status !== 401 && status !== 403) return ''
+    return `（提示：已按「${keyFormat}」格式携带 API Key 发出请求，但被服务端拒绝（HTTP ${status}）`
+      + `——请确认 API Key 与「密钥格式」是否匹配、密钥是否有效/未欠费）`
   }
 
   let lastError: unknown
@@ -480,13 +499,12 @@ function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPlug
         yield* stream(options, prepared)
         return
       }
-      const resolution = await resolveVisionKey(ctx, settings, llm)
-      if (resolution.source === 'route') {
-        // Worth a log line: route reuse is the one source the settings page does
-        // not show, so "which key was actually sent" is otherwise unknowable.
-        visionLogger(ctx)?.info?.(
-          `vision-plugin: no API Key configured; reusing the credential of route provider "${resolution.provider}" `
-          + `(Base URL ${settings.baseUrl}) for image transcription`,
+      const resolution = resolveVisionKey(settings)
+      if (resolution.source === 'none') {
+        // Logged as well as reported in the notice, so a failed turn is
+        // diagnosable from the host log alone.
+        visionLogger(ctx)?.error(
+          `vision-plugin: image transcription skipped — ${missingKeyMessage(normalizeKeyFormat(settings.keyFormat))}`,
         )
       }
       const transcriptions = await Promise.all(refs.map((ref) =>

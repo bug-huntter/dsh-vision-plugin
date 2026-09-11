@@ -6,6 +6,7 @@
  * with esbuild / standalone bundling.
  */
 import { useId, useSyncExternalStore, type ReactNode } from 'react'
+import { KEY_FORMATS, type KeyFormat } from '../authHeaders.ts'
 import type { VisionPluginKey } from './locales.ts'
 import type { TestOutcome } from './testConnection.ts'
 
@@ -19,7 +20,7 @@ export interface VisionModelsSectionState {
   fallbackModelId: string
   maxRetries: string
   apiKey: string
-  apiKeyEnv: string
+  keyFormat: KeyFormat
   dirty: boolean
   saving: boolean
   failed: boolean
@@ -134,6 +135,7 @@ export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode 
   const trackSt = state.enabled ? s.toggleTrackChecked : s.toggleTrack
   const thumbSt = state.enabled ? s.toggleThumbChecked : s.toggleThumb
   const inputEnabled = { ...s.input, opacity: dis ? 0.5 : 1, cursor: dis ? 'default' : 'text' }
+  const selectEnabled = { ...s.input, opacity: dis ? 0.5 : 1, cursor: dis ? 'default' : 'pointer' }
 
   return (
     <div style={s.section}>
@@ -197,17 +199,7 @@ export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode 
         <p style={s.hint}>{t('model.maxRetries.description')}</p>
       </div>
 
-      {/* API Key source (env / credential reference) */}
-      <div style={s.field}>
-        <label style={s.label} htmlFor={`${fieldId}-ake`}>{t('model.apiKeyEnv')}</label>
-        <input id={`${fieldId}-ake`} style={inputEnabled} type="text"
-          value={state.apiKeyEnv} placeholder={t('model.apiKeyEnv.placeholder')}
-          disabled={!state.writable}
-          onChange={(e) => { edit('apiKeyEnv', e.target.value) }} />
-        <p style={s.hint}>{t('model.apiKeyEnv.description')}</p>
-      </div>
-
-      {/* API Key */}
+      {/* API Key (the one and only key source) */}
       <div style={s.field}>
         <label style={s.label} htmlFor={`${fieldId}-ak`}>{t('model.apiKey')}</label>
         <input id={`${fieldId}-ak`} style={inputEnabled} type="password" autoComplete="off"
@@ -215,6 +207,19 @@ export function VisionModelsSection(props: VisionModelsSectionProps): ReactNode 
           disabled={!state.writable}
           onChange={(e) => { edit('apiKey', e.target.value) }} />
         <p style={s.hint}>{t('model.apiKey.description')}</p>
+      </div>
+
+      {/* Key format: which auth scheme carries the key above */}
+      <div style={s.field}>
+        <label style={s.label} htmlFor={`${fieldId}-kf`}>{t('model.keyFormat')}</label>
+        <select id={`${fieldId}-kf`} style={selectEnabled} value={state.keyFormat}
+          disabled={!state.writable}
+          onChange={(e) => { edit('keyFormat', e.target.value) }}>
+          {KEY_FORMATS.map((format) => (
+            <option key={format} value={format}>{t(`format.${format}` as VisionPluginKey)}</option>
+          ))}
+        </select>
+        <p style={s.hint}>{t('model.keyFormat.description')}</p>
       </div>
 
       {/* Connectivity / image-support test (browser-side probe of the draft values) */}

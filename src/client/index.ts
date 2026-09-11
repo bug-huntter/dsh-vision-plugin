@@ -8,8 +8,9 @@
  */
 import { VISION_PLUGIN_NAMESPACE } from '../constants.ts'
 import type { VisionPluginSettings } from '../index.ts'
+import { normalizeKeyFormat } from '../authHeaders.ts'
 import { commitOps, draftValue, type SettingsPathOp } from './commitSettings.ts'
-import { testVisionConnection, type TestOutcome } from './testConnection.ts'
+import { testVisionConnection, type TestOutcome, type TestValues } from './testConnection.ts'
 import {
   VisionModelsSection,
   type VisionModelsSectionInjected,
@@ -109,7 +110,7 @@ function buildState(
   const fallbackModelIdDraft = drafts.get('fallbackModelId')
   const maxRetriesDraft = drafts.get('maxRetries')
   const apiKeyDraft = drafts.get('apiKey')
-  const apiKeyEnvDraft = drafts.get('apiKeyEnv')
+  const keyFormatDraft = drafts.get('keyFormat')
 
   return {
     status: scopeSnapshot.status,
@@ -120,7 +121,7 @@ function buildState(
     fallbackModelId: fallbackModelIdDraft?.text ?? value?.fallbackModelId ?? '',
     maxRetries: maxRetriesDraft?.text ?? String(value?.maxRetries ?? 3),
     apiKey: apiKeyDraft?.text ?? value?.apiKey ?? '',
-    apiKeyEnv: apiKeyEnvDraft?.text ?? value?.apiKeyEnv ?? '',
+    keyFormat: normalizeKeyFormat(keyFormatDraft?.text ?? value?.keyFormat),
     dirty: Array.from(drafts.values()).some(d => d.dirty),
     saving,
     failed,
@@ -161,12 +162,13 @@ export function apply(ctx: ClientContext): void {
     ctx.effect(() => () => unsubscribeScope(), 'vision-plugin: settings snapshot')
 
     /** Current effective values: draft overrides on top of the saved snapshot. */
-    const draftValues = (): { baseUrl: string; modelId: string; apiKey: string } => {
+    const draftValues = (): TestValues => {
       const value = scope.getSnapshot().value
       return {
         baseUrl: drafts.get('baseUrl')?.text ?? value?.baseUrl ?? '',
         modelId: drafts.get('modelId')?.text ?? value?.modelId ?? '',
         apiKey: drafts.get('apiKey')?.text ?? value?.apiKey ?? '',
+        keyFormat: normalizeKeyFormat(drafts.get('keyFormat')?.text ?? value?.keyFormat),
       }
     }
 
