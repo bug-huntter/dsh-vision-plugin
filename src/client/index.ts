@@ -8,6 +8,7 @@
  */
 import { VISION_PLUGIN_NAMESPACE } from '../constants.ts'
 import type { VisionPluginSettings } from '../index.ts'
+import { commitOps, draftValue, type SettingsPathOp } from './commitSettings.ts'
 import { testVisionConnection, type TestOutcome } from './testConnection.ts'
 import {
   VisionModelsSection,
@@ -25,13 +26,15 @@ interface SettingsScopeSnapshot<T> {
   status: ScopeStatus
   value: T | undefined
   writable: boolean
+  revision?: number | undefined
 }
 
 /** The current `ctx.settingsScope.bind()` owner handle (structural subset). */
 interface VisionSettingsScope<T> {
   getSnapshot(): SettingsScopeSnapshot<T>
   subscribe(listener: () => void): () => void
-  set(field: string, value: unknown): Promise<void>
+  /** One atomic namespace mutation; every op shares a single revision fence. */
+  mutate(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>
 }
 
 /** Minimal observable used by the injected section component. */
@@ -217,16 +220,26 @@ export function apply(ctx: ClientContext): void {
       failed = false
       publish()
       try {
+        // One atomic mutation: every dirty field shares a single revision fence,
+        // so the section can never half-save. The drafts are cleared only after
+        // the Host section verifiably carries the edits — a REFUSED write
+        // settles without throwing (the scope re-reads Host state instead), and
+        // clearing on a refusal would throw the user's input away while showing
+        // them nothing at all.
+        const ops: SettingsPathOp[] = []
         for (const [field, draft] of drafts) {
           if (!draft.dirty) continue
-          if (field === 'enabled') {
-            await scope.set('enabled', draft.text === 'true')
-          } else if (field === 'maxRetries') {
-            const parsed = Number(draft.text)
-            await scope.set('maxRetries', draft.text.trim() === '' || isNaN(parsed) ? 3 : parsed)
-          } else {
-            await scope.set(field, draft.text)
-          }
+          ops.push({ op: 'set', path: [field], value: draftValue(field, draft.text) })
+        }
+        const outcome = await commitOps(scope, ops)
+        if (!outcome.ok) {
+          failed = true
+          console.error('vision-plugin: settings write did not land; drafts kept for the user to retry', {
+            ops,
+            outcome,
+            revision: scope.getSnapshot().revision,
+          })
+          return
         }
         drafts.clear()
       } catch (error: unknown) {

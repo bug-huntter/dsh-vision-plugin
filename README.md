@@ -90,6 +90,41 @@ vision-plugin:
 > 注意：设置页的「测试连接」在**浏览器里用当前填写的 key** 直接请求，而服务端运行时还会考虑 `apiKeyEnv` 与路由复用。v1.1.3 之后，只要 API Key 字段非空，两者就一致了；若你把 key 填进了「密钥来源（变量名）」字段（那是变量名，不是 key），浏览器测试无法复现服务端的解析结果。
 
 
+## v1.1.4 保存静默失败修复
+
+**症状**：在「设置 → 识图模型配置」里填好配置、点「测试连接」显示绿色通过，再点**保存**却像是没反应——**没有任何报错**，输入框自己弹回旧值，而且**保存按钮变灰点不动**了（"填完测试是绿的，然后就是保存不了"）。
+
+**原因**：DSH 的客户端设置契约里，被宿主**拒绝**的写入**不会抛异常**。`SettingsScope.mutate()` 的实现是：
+
+```js
+const response = await this.ctx.remote.settings.mutate(ns, ops, revision)
+if (!response.ok) { await this.recover(generation); return }   // 只重读宿主状态，不 throw
+```
+
+也就是"写入被拒 = 重新读一次宿主状态后正常返回"（契约原文：*a rejected or failed latest write reloads Host state instead*）。最常见的拒绝原因是**修订号（revision）过期**：宿主对设置了版本栅栏的命名空间会回 `settings/conflict`（`settings namespace "vision-plugin" changed since it was read (expected revision N, now M)`）。
+
+而本插件的保存逻辑原先是这样写的：
+
+```js
+try {
+  for (const draft of drafts) await scope.set(field, value)
+  drafts.clear()            // ← 无论写入是否真的成功，都清空草稿
+} catch (error) { failed = true }   // ← 永远不会进入：被拒不抛异常
+```
+
+于是被拒时三件事同时发生：**没有任何提示**（没抛异常）、**草稿被丢弃**（弹回旧值）、**保存按钮变灰**（没有 dirty 字段可存）。用户看到的就是"绿着，然后保存不了"。
+
+**修复**（v1.1.4）——让写入结果**可判定**，而不是靠 try/catch 猜：
+
+- **原子写入**：所有脏字段合成**一次** `mutate`（共享同一个版本栅栏），因此不存在"存了一半"的状态
+- **写入后校验**：写完读回宿主已解析的 section，逐字段确认值真的落盘
+- **自动重试一次**：被拒的那次写入自身已完成恢复性重读（刷新了版本栅栏），因此重试通常直接成功——这正是"页面 Revision 过期"场景的治愈方式
+- **仍然失败就明说**：保留用户草稿（不清空、按钮不置灰），并在面板上给出可操作提示"保存失败：配置未写入（多为页面持有的配置版本已过期），请重试或刷新页面后再保存"
+- **回归测试**：`test/commit-settings.test.mjs` 锁定上述行为，包括"被拒一次后重试成功"与"始终被拒时必须报错而非静默丢弃"两条
+
+> 遇到这个报错的用户：**刷新一次设置页**（Ctrl+R）即可让页面拿到最新版本栅栏；v1.1.4 之后即便再次遇到并发写入，也会自动重试或明确报错，而不会再默默丢掉你的输入。
+
+
 ## 安装
 
 ### DSH 版本兼容
@@ -189,10 +224,12 @@ pnpm install
 # 构建（node + client 两半产物）
 pnpm build
 
-# 回归测试：API Key 来源优先级
+# 回归测试：API Key 来源优先级 + 保存写入结果判定
+# （test/key-resolution.test.mjs、test/commit-settings.test.mjs）
 npm test
 
-# 把构建产物同步进本机所有已安装的 DSH profile（之后需重启 DSH）
+# 把构建产物同步进本机所有已安装的 DSH profile
+# 仅改客户端（设置页）时刷新页面即可；改主机端需重启 DSH
 pnpm sync
 ```
 
