@@ -36,10 +36,10 @@ export const zh = {
 
   'model.apiKey': 'API Key',
   'model.apiKey.placeholder': 'sk-xxxxxxxxxxxxxxxx',
-  'model.apiKey.description': 'API 密钥（敏感信息，请妥善保管）',
+  'model.apiKey.description': 'API 密钥（敏感信息，请妥善保管）。填写后即用于识图请求，优先于「复用同 Base URL 路由的密钥」',
   'model.apiKeyEnv': '密钥来源（变量名）',
   'model.apiKeyEnv.placeholder': 'OPENROUTER_API_KEY',
-  'model.apiKeyEnv.description': '环境变量或凭证名。留空则自动复用同 Base URL 路由已配置的密钥。优先级：此字段 > 复用路由 > API Key',
+  'model.apiKeyEnv.description': '环境变量或凭证名。留空时优先使用下面的 API Key 字段，两者都留空才自动复用同 Base URL 路由已配置的密钥。优先级：密钥来源 > API Key > 复用路由',
 
   'save': '保存',
   'saving': '保存中...',
@@ -92,10 +92,10 @@ export const en: Record<VisionPluginKey, string> = {
 
   'model.apiKey': 'API Key',
   'model.apiKey.placeholder': 'sk-xxxxxxxxxxxxxxxx',
-  'model.apiKey.description': 'API key (sensitive information, handle with care)',
+  'model.apiKey.description': 'API key (sensitive information, handle with care). Once filled it is used as-is for image requests, ahead of route key reuse',
   'model.apiKeyEnv': 'Key Source (env/credential name)',
   'model.apiKeyEnv.placeholder': 'OPENROUTER_API_KEY',
-  'model.apiKeyEnv.description': 'Environment variable or credential reference. When empty, the key of the model route sharing this Base URL is reused. Priority: this field > route reuse > API Key',
+  'model.apiKeyEnv.description': 'Environment variable or credential reference. When empty, the literal API Key below wins; only when both are empty is the key of the model route sharing this Base URL reused. Priority: this field > API Key > route reuse',
 
   'save': 'Save',
   'saving': 'Saving...',

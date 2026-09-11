@@ -5,10 +5,11 @@
  * third-party plugins (`dsh-api-remotes` only forwards a host→client event
  * allowlist), so this is the only mechanism that works across DSH versions.
  *
- * Caveat: keys that the server resolves at request time (apiKeyEnv / route
- * reuse) cannot be reproduced here; auth-type failures with no literal key are
- * reported as "unverifiable" (save allowed with a warning) instead of blocking
- * the save.
+ * Caveat: a key the server resolves at request time (`apiKeyEnv`, or route
+ * reuse as a last resort) cannot be reproduced here; auth-type failures with no
+ * literal key are reported as "unverifiable" (save allowed with a warning)
+ * instead of blocking the save. A non-empty API Key field, however, is exactly
+ * what the server sends (v1.1.3+), so a pass/fail for it is representative.
  */
 
 /** A small 32x32 solid PNG sent to the model to prove image input works. */

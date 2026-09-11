@@ -32,6 +32,7 @@ import type {
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import { VISION_PLUGIN_NAMESPACE } from './constants.ts'
+import { resolveVisionKey, type VisionKeyResolution } from './keyResolution.ts'
 
 export interface VisionPluginSettings {
   /** Whether image recognition is enabled. */
@@ -40,9 +41,14 @@ export interface VisionPluginSettings {
   baseUrl: string
   /** Model identifier to use for vision tasks. */
   modelId: string
-  /** API key for authenticating with the vision model provider (or a credential/env reference via apiKeyEnv). */
+  /** API key for authenticating with the vision model provider (or a credential/env reference via apiKeyEnv). A literal key here beats reuse of a route sharing `baseUrl`. */
   apiKey: string
-  /** Environment variable or credential reference holding the API key; wins over a literal apiKey when set and resolvable. */
+  /**
+   * Environment variable or credential reference holding the API key; wins over
+   * a literal `apiKey` when set and resolvable. Full priority order:
+   * `apiKeyEnv` > `apiKey` > reuse of the credential registered for a route
+   * whose Base URL matches `baseUrl`.
+   */
   apiKeyEnv: string
   /** Optional override of the transcription instruction sent with each image. */
   prompt?: string
@@ -105,6 +111,19 @@ function errorMessage(value: unknown): string {
     typeof cause.port === 'number' ? `port=${cause.port}` : undefined,
   ].filter((part): part is string => part !== undefined)
   return causeParts.length === 0 ? value.message : `${value.message} (${causeParts.join(', ')})`
+}
+
+/** The host logger, when the runtime exposes one. */
+function visionLogger(ctx: Context): {
+  error(message: string, ...args: unknown[]): void
+  info?(message: string, ...args: unknown[]): void
+} | undefined {
+  return (ctx as {
+    logger?: {
+      error(message: string, ...args: unknown[]): void
+      info?(message: string, ...args: unknown[]): void
+    }
+  }).logger
 }
 
 function messageHasImage(content: readonly ContentBlock[]): boolean {
@@ -171,88 +190,28 @@ function mapBlocksReplacingImages(
   return changed ? result : undefined
 }
 
-/**
- * Resolve the API key for one transcription call: a named credential/env
- * reference wins when set and resolvable, then the literal `apiKey`.
- */
-/**
- * Resolve the API key for transcription calls, in priority order:
- * (1) a resolvable `apiKeyEnv` credential reference or environment variable;
- * (2) reuse of a registered LLM provider route whose configured endpoint
- *     matches `baseUrl` - its stored credential is resolved through the
- *     adapter own credential seam (settings.yaml credentials are reused,
- *     never duplicated);
- * (3) the literal `apiKey`.
- */
-async function resolveVisionKey(
-  ctx: Context,
-  settings: VisionPluginSettings,
-  llm: LlmRuntime,
-): Promise<string> {
-  const credentials = ctx.get('credentials') as
-    { resolve: (ref: string) => Promise<{ value?: string } | undefined> } | undefined
-  const resolveRef = async (ref: string): Promise<string | undefined> => {
-    if (ref.length === 0) return undefined
-    if (credentials !== undefined) {
-      try {
-        const hit = await credentials.resolve(ref)
-        if (hit?.value !== undefined && hit.value.length > 0) return hit.value
-      } catch (_unresolvable) {
-        // A reference the credentials service refuses falls through to the
-        // environment; an empty result is a misconfiguration, not a retry.
-      }
-    }
-    const env = process.env[ref]
-    return env !== undefined && env.length > 0 ? env : undefined
-  }
-  const fromEnv = await resolveRef(settings.apiKeyEnv)
-  if (fromEnv !== undefined) return fromEnv
-  const instance = llm[symbols.original] ?? llm
-  const adaptersMap = Reflect.get(instance, 'adapters') as Map<string, { adapter?: unknown } | undefined> | undefined
-  if (adaptersMap !== undefined) {
-    const wantedBase = settings.baseUrl.replace(/\/+$/, '').toLowerCase()
-    const candidates: Array<() => Promise<string | undefined>> = []
-    for (const registration of adaptersMap.values()) {
-      const adapter = (registration?.adapter ?? undefined) as {
-        config?: {
-          resolveApiKey?: (provider: string, profile: { apiKeyEnv?: string }) => Promise<string | undefined>
-          profiles?: () => Map<string, { apiKeyEnv?: string; piProvider?: { baseUrl?: string } }>
-        }
-      } | undefined
-      const resolveApiKey = adapter?.config?.resolveApiKey
-      const profiles = adapter?.config?.profiles
-      if (typeof resolveApiKey !== 'function' || typeof profiles !== 'function') continue
-      let routeProfiles: Map<string, { apiKeyEnv?: string; piProvider?: { baseUrl?: string } }> | undefined
-      try {
-        routeProfiles = profiles.call(adapter?.config)
-      } catch (_unreadable) {
-        continue
-      }
-      for (const [provider, profile] of routeProfiles) {
-        const routeBase = (profile.piProvider?.baseUrl ?? '').replace(/\/+$/, '').toLowerCase()
-        if (routeBase !== wantedBase) continue
-        if ((profile.apiKeyEnv ?? '').length === 0) continue
-        candidates.push(async () => {
-          try {
-            const key = await resolveApiKey.call(adapter?.config, provider, profile)
-            return key !== undefined && key.length > 0 ? key : undefined
-          } catch (_unresolvable) {
-            return undefined
-          }
-        })
-      }
-    }
-    for (const candidate of candidates) {
-      const key = await candidate()
-      if (key !== undefined) return key
-    }
-  }
-  return settings.apiKey
-}
 /** Error carrying the HTTP status (and Retry-After) of a failed transcription request. */
 interface VisionHttpError extends Error {
   status?: number
   retryAfterSeconds?: number
+  /**
+   * Actionable, user-facing hint for this failure. Kept beside the message
+   * instead of appended to it, because the notice that replaces a failed image
+   * truncates the message (and a long provider body would swallow the hint).
+   */
+  hint?: string
+}
+
+/** Attach a user-facing hint to a failed request without bloating its message. */
+function withHint<T>(error: T, hint: string): T {
+  if (hint.length > 0 && error instanceof Error) (error as { hint?: string }).hint = hint
+  return error
+}
+
+/** The user-facing hint carried by a failed request, if any. */
+function hintOf(error: unknown): string {
+  const hint = (error as { hint?: unknown })?.hint
+  return typeof hint === 'string' ? hint : ''
 }
 
 function visionHttpError(status: number, body: string, retryAfterSeconds?: number): VisionHttpError {
@@ -315,10 +274,11 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 async function transcribeImage(
   data: Uint8Array,
   mediaType: string,
-  apiKey: string,
+  resolution: VisionKeyResolution,
   settings: VisionPluginSettings,
   signal: AbortSignal | undefined,
 ): Promise<string> {
+  const apiKey = resolution.key
   const base = settings.baseUrl.replace(/\/+$/, '')
   if (base.length === 0) {
     throw new Error('vision-plugin: no Base URL configured — set it in 设置 → 识图模型配置')
@@ -386,10 +346,22 @@ async function transcribeImage(
     }
   }
 
-  const noKeyHint = (status: number | undefined): string =>
-    apiKey.length === 0 && (status === 401 || status === 403 || status === 429)
-      ? '（提示：本次识图请求未携带 API Key——请在 设置 → 识图模型配置 的 API Key 字段填写，或配置可解析的密钥来源）'
-      : ''
+  /**
+   * Hints for auth failures. An empty key points at the settings fields; a key
+   * that came from route reuse names the route that supplied it, because that
+   * reuse is only a fallback — a rejected request means the route's credential
+   * is not the one this Base URL needs, and filling the field overrides it.
+   */
+  const authHint = (status: number | undefined): string => {
+    if (status !== 401 && status !== 403 && status !== 429) return ''
+    if (apiKey.length === 0) {
+      return '（提示：本次识图请求未携带 API Key——请在 设置 → 识图模型配置 的 API Key 字段填写，或配置可解析的密钥来源）'
+    }
+    if (resolution.source === 'route' && (status === 401 || status === 403)) {
+      return `（提示：本次识图请求复用了路由「${resolution.provider ?? '未知'}」已注册的密钥，被服务端拒绝——请在该配置页的 API Key 字段显式填写此视觉模型自己的密钥）`
+    }
+    return ''
+  }
 
   let lastError: unknown
   for (const model of models) {
@@ -401,20 +373,14 @@ async function transcribeImage(
         lastError = error
         const status = (error as VisionHttpError)?.status
         const retryable = status === undefined ? true : isRetryableStatus(status)
-        if (!retryable) {
-          const hint = noKeyHint(status)
-          if (hint.length > 0) throw new Error(`${errorMessage(error)}${hint}`, { cause: error })
-          throw error
-        }
+        if (!retryable) throw withHint(error, authHint(status))
         if (attempt === maxRetries) break // move to the fallback model, or fail finally
         await sleep(retryDelayMs(error, attempt), signal)
       }
     }
   }
   const status = (lastError as VisionHttpError)?.status
-  const hint = noKeyHint(status)
-  if (hint.length > 0) throw new Error(`${errorMessage(lastError)}${hint}`, { cause: lastError })
-  throw lastError
+  throw withHint(lastError, authHint(status))
 }
 
 /**
@@ -514,10 +480,18 @@ function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPlug
         yield* stream(options, prepared)
         return
       }
-      const apiKey = await resolveVisionKey(ctx, settings, llm)
+      const resolution = await resolveVisionKey(ctx, settings, llm)
+      if (resolution.source === 'route') {
+        // Worth a log line: route reuse is the one source the settings page does
+        // not show, so "which key was actually sent" is otherwise unknowable.
+        visionLogger(ctx)?.info?.(
+          `vision-plugin: no API Key configured; reusing the credential of route provider "${resolution.provider}" `
+          + `(Base URL ${settings.baseUrl}) for image transcription`,
+        )
+      }
       const transcriptions = await Promise.all(refs.map((ref) =>
         attachments.readImage(ref, options.signal)
-          .then((stored) => transcribeImage(stored.data, ref.mediaType, apiKey, settings, options.signal))))
+          .then((stored) => transcribeImage(stored.data, ref.mediaType, resolution, settings, options.signal))))
       let cursor = 0
       const nextTranscription = (): string => {
         const text = transcriptions[cursor]
@@ -543,9 +517,13 @@ function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPlug
       // the conversation continues and the (text-only) main model never
       // receives raw image bytes it cannot handle. The failure is logged for
       // diagnosis instead of aborting the conversation.
-      const logger = (ctx as { logger?: { error(message: string, ...args: unknown[]): void } }).logger
-      logger?.error(`vision-plugin: image transcription failed; continuing with a text placeholder: ${errorMessage(error)}`)
-      const notice = `[图片转写失败：${errorMessage(error).slice(0, 200)}——该图片未传递给模型]`
+      const logger = visionLogger(ctx)
+      const detail = errorMessage(error)
+      const hint = hintOf(error)
+      logger?.error(`vision-plugin: image transcription failed; continuing with a text placeholder: ${detail}${hint}`)
+      // The hint trails the (truncated) detail so a long provider body can never
+      // push the actionable part out of the notice the user actually reads.
+      const notice = `[图片转写失败：${detail.slice(0, 200)}${hint}——该图片未传递给模型]`
       const messages = options.messages ?? []
       const fallback: Message[] = messages.map((message) => {
         if (message.role !== 'user') return message
