@@ -30,7 +30,6 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import { VISION_PLUGIN_NAMESPACE } from './constants.ts'
 import { authHeaders, DEFAULT_KEY_FORMAT, normalizeKeyFormat, type KeyFormat } from './authHeaders.ts'
 import { resolveVisionKey, type VisionKeyResolution } from './keyResolution.ts'
@@ -74,19 +73,26 @@ export interface VisionPluginSettings {
 }
 
 const VisionPluginSettingsSchema: z<VisionPluginSettings> = z.object({
-  enabled: z.boolean().default(false),
-  baseUrl: z.string().default(''),
-  modelId: z.string().default(''),
-  apiKey: z.string().default(''),
+  enabled: z.boolean().default(false).volatile(),
+  baseUrl: z.string().default('').volatile(),
+  modelId: z.string().default('').volatile(),
+  apiKey: z.string().default('').volatile(),
   // A plain string, normalized at use: a hand-edited settings.yaml typo then
   // degrades to the default instead of failing namespace validation (which
   // would reject every later write with `settings/rejected`).
-  keyFormat: z.string().default(DEFAULT_KEY_FORMAT),
-  prompt: z.string().default(''),
-  timeoutMs: z.number().default(120000),
-  maxRetries: z.number().min(0).default(3),
-  fallbackModelId: z.string().default(''),
+  keyFormat: z.string().default(DEFAULT_KEY_FORMAT).volatile(),
+  prompt: z.string().default('').volatile(),
+  timeoutMs: z.number().default(120000).volatile(),
+  maxRetries: z.number().min(0).default(3).volatile(),
+  fallbackModelId: z.string().default('').volatile(),
 })
+
+/**
+ * 0.1.7 settings contract: the profile entry's Config schema IS the settings
+ * namespace schema. Exporting it under `Config` makes the `vision-plugin`
+ * profile entry a configurable form (describe/mutate) for the client card.
+ */
+export const Config: z<VisionPluginSettings> = VisionPluginSettingsSchema
 
 /** Base delay (ms) for the first exponential-backoff wait on a transient error. */
 const RETRY_BASE_DELAY_MS = 1000
@@ -409,7 +415,7 @@ async function transcribeImage(
  * instance each access, so the api-proxy's admission guard sees the patched
  * methods.
  */
-function installImageGuardBypass(ctx: Context, scope: SettingsScope<VisionPluginSettings>, llm: LlmRuntime): void {
+function installImageGuardBypass(ctx: Context, settings: VisionPluginSettings, llm: LlmRuntime): void {
   const instance = llm[symbols.original] ?? llm
   const proto = Object.getPrototypeOf(instance)
   const originalResolve = Object.getOwnPropertyDescriptor(proto, 'resolveModelInfo')?.value
@@ -441,35 +447,27 @@ function installImageGuardBypass(ctx: Context, scope: SettingsScope<VisionPlugin
     active = false
   }
   const apply = (enabled: boolean): void => { enabled ? activate() : deactivate() }
-  apply(scope.get().enabled)
-  ctx.effect(() => {
-    const unwatch = scope.watch((next) => apply(next.enabled))
-    return () => {
-      unwatch()
-      deactivate()
-    }
-  }, 'vision-plugin: image capability advertisement')
-}
+    apply(settings.enabled)
+  }
 
-/**
- * Rewrite a request's image blocks into vision-model transcriptions, yielding
- * the downstream chunks of the rewritten request. The patch wraps the
- * runtime's private `streamWithRegistration` — the seam every `stream` call
- * passes BEFORE it dispatches the `llm/stream` waterfall — so the
- * agent-loop's request-reconstruction invariant (a waterfall listener that
- * compares options against the durable session log) still sees a matching
- * request, and no waterfall listener observes a raw image version of a
- * rewritten call. The original request object is never mutated; loop-built
- * requests arrive deep-frozen.
- */
-function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPluginSettings>, llm: LlmRuntime): void {
+  /**
+   * Rewrite a request's image blocks into vision-model transcriptions, yielding
+   * the downstream chunks of the rewritten request. The patch wraps the
+   * runtime's private `streamWithRegistration` — the seam every `stream` call
+   * passes BEFORE it dispatches the `llm/stream` waterfall — so the
+   * agent-loop's request-reconstruction invariant (a waterfall listener that
+   * compares options against the durable session log) still sees a matching
+   * request, and no waterfall listener observes a raw image version of a
+   * rewritten call. The original request object is never mutated; loop-built
+   * requests arrive deep-frozen.
+   */
+  function installImageTranscription(ctx: Context, settings: VisionPluginSettings, llm: LlmRuntime): void {
   const instance = llm[symbols.original] ?? llm
   const originalStream = Reflect.get(instance, 'streamWithRegistration') as ((options: GenerateOptions, prepared?: unknown) => AsyncIterable<StreamChunk>) | undefined
   if (typeof originalStream !== 'function') return
   const stream = (options: GenerateOptions, prepared?: unknown): AsyncIterable<StreamChunk> => originalStream.call(instance, options, prepared)
   const transcribingStream = async function* (options: GenerateOptions, prepared?: unknown): AsyncGenerator<StreamChunk> {
-    const settings = scope.get()
-    const needsTranscription = settings.enabled
+      const needsTranscription = settings.enabled
       && settings.baseUrl.length > 0
       && settings.modelId.length > 0
       && options.messages.some((message) => message.role === 'user' && messageHasImage(message.content))
@@ -552,61 +550,57 @@ function installImageTranscription(ctx: Context, scope: SettingsScope<VisionPlug
     }
   } as (options: GenerateOptions, prepared?: unknown) => AsyncIterable<StreamChunk>
   ctx.effect(() => {
-    Object.defineProperty(instance, 'streamWithRegistration', {
-      value: (options: GenerateOptions, prepared?: unknown): AsyncIterable<StreamChunk> => {
-        if (scope.get().enabled) return transcribingStream(options, prepared)
-        return stream(options, prepared)
-      },
-      writable: true,
-      configurable: true,
+      Object.defineProperty(instance, 'streamWithRegistration', {
+        value: (options: GenerateOptions, prepared?: unknown): AsyncIterable<StreamChunk> => {
+          if (settings.enabled) return transcribingStream(options, prepared)
+          return stream(options, prepared)
+        },
+        writable: true,
+        configurable: true,
+      })
+      return () => {
+        delete instance.streamWithRegistration
+      }
+    }, 'vision-plugin: image transcription boundary')
+  }
+
+  /**
+   * Arm the vision pipeline. 0.1.7 settings contract: the namespace schema is
+   * this module's exported `Config`; a settings save hot-reloads this entry and
+   * re-runs apply with the fresh config, so `enabled` and every field are read
+   * from the `config` argument directly (no runtime scope/watch needed).
+   */
+  export function apply(ctx: Context, config: VisionPluginSettings): void {
+    // Image pipeline: needs llm and the durable attachment reader. Wrapped in
+    // try/catch so the UI remains usable and the error is logged even if the
+    // runtime surface changes shape.
+    ctx.inject(['llm', 'attachments'], (both) => {
+      try {
+        installImageGuardBypass(both, config, both.llm)
+        installImageTranscription(both, config, both.llm)
+      } catch (error: unknown) {
+        const logger = both.logger ?? ctx.logger
+        logger?.error('vision-plugin: failed to install image pipeline patches', error)
+      }
     })
-    return () => {
-      delete instance.streamWithRegistration
-    }
-  }, 'vision-plugin: image transcription boundary')
-}
 
-/** Register the settings namespace and arm the vision pipeline. */
-export function apply(ctx: Context): void {
-  // Register the namespace in its own inject so a failure in the LLM/attachment
-  // patching phase never tears down the settings scope that the UI needs.
-  let scope: SettingsScope<VisionPluginSettings> | undefined
-  ctx.inject(['settings'], (settingsCtx) => {
-    scope = settingsCtx.settings.register(VISION_PLUGIN_NAMESPACE, VisionPluginSettingsSchema)
-  })
+    // Expose the settings namespace to the web configuration boundary. Without
+    // this registration the settings page can read the namespace (describe) but
+    // every write is refused with "settings-not-exposed", which surfaces as
+    // "保存失败，请重试". settingsNs must equal the profile entry id
+    // (`vision-plugin`), matching the Config export above.
+    ctx.inject(['llm'], (both) => {
+      const handle = both.llm.registerConfigurableProviders([{
+        provider: 'vision-plugin-settings',
+        displayName: '识图模型配置',
+        settingsNs: VISION_PLUGIN_NAMESPACE,
+        settingsPath: [],
+      }])
+      both.effect(() => handle, 'vision-plugin: settings namespace exposure')
+    })
+  }
 
-  // Image pipeline: needs settings (for the registered scope), llm, and the
-  // durable attachment reader. Wrapped in try/catch so the UI remains usable
-  // and the error is logged even if the runtime surface changes shape.
-  ctx.inject(['settings', 'llm', 'attachments'], (both) => {
-    if (scope === undefined) return
-    try {
-      installImageGuardBypass(both, scope, both.llm)
-      installImageTranscription(both, scope, both.llm)
-    } catch (error: unknown) {
-      const logger = both.logger ?? ctx.logger
-      logger?.error('vision-plugin: failed to install image pipeline patches', error)
-    }
-  })
-
-  // Expose the settings namespace to the web configuration boundary. The
-  // api-proxy's settings.mutate/update/replace only serve namespaces that are
-  // registered through registerConfigurableProviders or the explicit
-  // WEB/PRODUCT allowlists. Without this registration the settings page can
-  // read the namespace (describe) but every write is refused with
-  // "settings-not-exposed", which surfaces as "保存失败，请重试".
-  ctx.inject(['settings', 'llm'], (both) => {
-    const handle = both.llm.registerConfigurableProviders([{
-      provider: 'vision-plugin-settings',
-      displayName: '识图模型配置',
-      settingsNs: VISION_PLUGIN_NAMESPACE,
-      settingsPath: [],
-    }])
-    both.effect(() => handle, 'vision-plugin: settings namespace exposure')
-  })
-}
-
-export { VISION_PLUGIN_NAMESPACE }
+  export { VISION_PLUGIN_NAMESPACE }
 
 
 

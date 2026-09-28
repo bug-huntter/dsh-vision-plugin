@@ -2,9 +2,11 @@
  * Vision plugin browser half.
  *
  * DSH 0.1.2-alpha removed `@deepseek-ai/dsh-client-runtime` and the
- * `settingsNamespace` helper. This half therefore keeps its own tiny store
- * and talks only to services current web shells provide (`locale`, `slots`,
- * and the `settingsScope` binder exposed by dsh-client-ui-settings).
+ * `settingsNamespace` helper; DSH 0.1.7-rc.2 removed the `settingsScope`
+ * service and forbids nested `ctx.inject()` on dynamic client halves. This
+ * half therefore keeps its own tiny store and binds its settings form through
+ * the `configForms` service (`ctx.configForms.get(ns)` — the per-namespace
+ * `ConfigFormController`), declaring every dependency at the top level.
  */
 import { VISION_PLUGIN_NAMESPACE } from '../constants.ts'
 import type { VisionPluginSettings } from '../index.ts'
@@ -22,7 +24,11 @@ const NS = 'vision-plugin'
 
 type ScopeStatus = 'loading' | 'ready' | 'unavailable'
 
-/** The current client settings-scope snapshot (structural subset). */
+/**
+ * The client settings-form snapshot (structural subset of
+ * `ConfigFormController.getSnapshot()`): status / merged value / writability /
+ * revision fence — the same shape the pre-0.1.7 `settingsScope` exposed.
+ */
 interface SettingsScopeSnapshot<T> {
   status: ScopeStatus
   value: T | undefined
@@ -30,12 +36,19 @@ interface SettingsScopeSnapshot<T> {
   revision?: number | undefined
 }
 
-/** The current `ctx.settingsScope.bind()` owner handle (structural subset). */
+/**
+ * The bound settings form handle (structural subset of
+ * `ConfigFormController`): observable snapshot plus the atomic-mutation write
+ * faces. `mutate` settles a REFUSED write normally (it re-reads Host state),
+ * and `set` is the per-field face on the same controller.
+ */
 interface VisionSettingsScope<T> {
   getSnapshot(): SettingsScopeSnapshot<T>
   subscribe(listener: () => void): () => void
   /** One atomic namespace mutation; every op shares a single revision fence. */
-  mutate(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>
+  mutate(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<boolean>
+  /** One field write (the per-field face; kept for older builds). */
+  set(field: string, value: unknown): Promise<boolean>
 }
 
 /** Minimal observable used by the injected section component. */
@@ -72,20 +85,20 @@ interface SlotsService {
   register(meta: Record<string, unknown>, component: unknown): unknown
 }
 
+interface ConfigFormsService {
+  /**
+   * Bind the shared settings form of one Host plugin entry. The namespace is
+   * the profile entry id (`vision-plugin`), which is also what the host
+   * exposure (`settingsNs`) and this module's schema export address.
+   */
+  get(namespace: string): VisionSettingsScope<unknown>
+}
+
 interface ClientContext {
   effect(callback: () => unknown, label?: string): void
   locale: LocaleService
   slots: SlotsService
-}
-
-interface ScopeAwareContext extends ClientContext {
-  settingsScope: {
-    bind<T>(spec: { namespace: string }): VisionSettingsScope<T>
-  }
-}
-
-interface InjectingClientContext extends ClientContext {
-  inject(services: readonly string[], callback: (scoped: ScopeAwareContext) => void): void
+  configForms: ConfigFormsService
 }
 
 /** Local drafts for the section editor. */
@@ -130,13 +143,15 @@ function buildState(
   }
 }
 
-/** Required services (cordis fiber inject). */
-export const inject = ['slots', 'locale']
+/**
+ * Required services (cordis fiber inject). `configForms` is provided by
+ * dsh-client-ui-settings and replaces the removed `settingsScope` binder.
+ */
+export const inject = ['slots', 'locale', 'configForms']
 
 /**
- * Register the dictionaries and the settings section. The scope is bound on
- * a nested inject so a shell without `settingsScope` simply skips the page
- * instead of blocking the whole plugin.
+ * Register the dictionaries and the settings section, bound to the shared
+ * config form of the plugin's profile entry.
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(
@@ -145,131 +160,127 @@ export function apply(ctx: ClientContext): void {
   )
 
   const t = ctx.locale.bind(NS) as (key: VisionPluginKey) => string
-  const withInject = ctx as unknown as InjectingClientContext
+  const scope = ctx.configForms.get<unknown>(VISION_PLUGIN_NAMESPACE) as unknown as VisionSettingsScope<VisionPluginSettings>
+  const drafts = new Map<string, DraftEntry>()
+  let saving = false
+  let failed = false
+  let testing = false
+  let testResult: TestOutcome | null = null
+  const store = createStore(buildState(scope.getSnapshot(), drafts, saving, failed, testing, testResult))
+  const publish = (): void => {
+    store.set(buildState(scope.getSnapshot(), drafts, saving, failed, testing, testResult))
+  }
+  const unsubscribeScope = scope.subscribe(publish)
+  ctx.effect(() => () => unsubscribeScope(), 'vision-plugin: settings snapshot')
 
-  withInject.inject(['settingsScope'], (scoped) => {
-    const scope = scoped.settingsScope.bind<VisionPluginSettings>({ namespace: VISION_PLUGIN_NAMESPACE })
-    const drafts = new Map<string, DraftEntry>()
-    let saving = false
-    let failed = false
-    let testing = false
-    let testResult: TestOutcome | null = null
-    const store = createStore(buildState(scope.getSnapshot(), drafts, saving, failed, testing, testResult))
-    const publish = (): void => {
-      store.set(buildState(scope.getSnapshot(), drafts, saving, failed, testing, testResult))
+  /** Current effective values: draft overrides on top of the saved snapshot. */
+  const draftValues = (): TestValues => {
+    const value = scope.getSnapshot().value
+    return {
+      baseUrl: drafts.get('baseUrl')?.text ?? value?.baseUrl ?? '',
+      modelId: drafts.get('modelId')?.text ?? value?.modelId ?? '',
+      apiKey: drafts.get('apiKey')?.text ?? value?.apiKey ?? '',
+      keyFormat: normalizeKeyFormat(drafts.get('keyFormat')?.text ?? value?.keyFormat),
     }
-    const unsubscribeScope = scope.subscribe(publish)
-    ctx.effect(() => () => unsubscribeScope(), 'vision-plugin: settings snapshot')
+  }
 
-    /** Current effective values: draft overrides on top of the saved snapshot. */
-    const draftValues = (): TestValues => {
-      const value = scope.getSnapshot().value
-      return {
-        baseUrl: drafts.get('baseUrl')?.text ?? value?.baseUrl ?? '',
-        modelId: drafts.get('modelId')?.text ?? value?.modelId ?? '',
-        apiKey: drafts.get('apiKey')?.text ?? value?.apiKey ?? '',
-        keyFormat: normalizeKeyFormat(drafts.get('keyFormat')?.text ?? value?.keyFormat),
-      }
-    }
+  const edit = (field: string, text: string): void => {
+    drafts.set(field, { text, dirty: true })
+    failed = false
+    publish()
+  }
 
-    const edit = (field: string, text: string): void => {
-      drafts.set(field, { text, dirty: true })
-      failed = false
+  const discard = (): void => {
+    drafts.clear()
+    failed = false
+    publish()
+  }
+
+  /** Probe the vision endpoint with the current draft values (no persistence). */
+  const test = async (): Promise<void> => {
+    if (testing || saving) return
+    testing = true
+    testResult = null
+    publish()
+    try {
+      testResult = await testVisionConnection(draftValues())
+    } finally {
+      testing = false
       publish()
     }
+  }
 
-    const discard = (): void => {
-      drafts.clear()
-      failed = false
-      publish()
-    }
-
-    /** Probe the vision endpoint with the current draft values (no persistence). */
-    const test = async (): Promise<void> => {
-      if (testing || saving) return
+  const save = async (): Promise<void> => {
+    if (saving || !Array.from(drafts.values()).some(d => d.dirty)) return
+    // Connectivity / image-support gate: run the probe against the current
+    // drafts first. Hard configuration errors (bad base URL/model/key,
+    // unsupported image input) block the save; transient (429/5xx/timeout)
+    // and unverifiable (server-side key / CORS) outcomes warn but allow it.
+    // Skipped entirely when the plugin ends up disabled.
+    const willEnable = drafts.get('enabled') !== undefined
+      ? drafts.get('enabled')!.text === 'true'
+      : (scope.getSnapshot().value?.enabled ?? false)
+    if (willEnable) {
       testing = true
       testResult = null
       publish()
-      try {
-        testResult = await testVisionConnection(draftValues())
-      } finally {
-        testing = false
-        publish()
-      }
-    }
-
-    const save = async (): Promise<void> => {
-      if (saving || !Array.from(drafts.values()).some(d => d.dirty)) return
-      // Connectivity / image-support gate: run the probe against the current
-      // drafts first. Hard configuration errors (bad base URL/model/key,
-      // unsupported image input) block the save; transient (429/5xx/timeout)
-      // and unverifiable (server-side key / CORS) outcomes warn but allow it.
-      // Skipped entirely when the plugin ends up disabled.
-      const willEnable = drafts.get('enabled') !== undefined
-        ? drafts.get('enabled')!.text === 'true'
-        : (scope.getSnapshot().value?.enabled ?? false)
-      if (willEnable) {
-        testing = true
-        testResult = null
-        publish()
-        const outcome = await testVisionConnection(draftValues())
-        testing = false
-        testResult = outcome
-        publish()
-        if (!outcome.canSave) return
-      }
-      saving = true
-      failed = false
+      const outcome = await testVisionConnection(draftValues())
+      testing = false
+      testResult = outcome
       publish()
-      try {
-        // One atomic mutation: every dirty field shares a single revision fence,
-        // so the section can never half-save. The drafts are cleared only after
-        // the Host section verifiably carries the edits — a REFUSED write
-        // settles without throwing (the scope re-reads Host state instead), and
-        // clearing on a refusal would throw the user's input away while showing
-        // them nothing at all.
-        const ops: SettingsPathOp[] = []
-        for (const [field, draft] of drafts) {
-          if (!draft.dirty) continue
-          ops.push({ op: 'set', path: [field], value: draftValue(field, draft.text) })
-        }
-        const outcome = await commitOps(scope, ops)
-        if (!outcome.ok) {
-          failed = true
-          console.error('vision-plugin: settings write did not land; drafts kept for the user to retry', {
-            ops,
-            outcome,
-            revision: scope.getSnapshot().revision,
-          })
-          return
-        }
-        drafts.clear()
-      } catch (error: unknown) {
-        failed = true
-        console.error('vision-plugin: failed to save section', error)
-      } finally {
-        saving = false
-        publish()
-      }
+      if (!outcome.canSave) return
     }
+    saving = true
+    failed = false
+    publish()
+    try {
+      // One atomic mutation: every dirty field shares a single revision fence,
+      // so the section can never half-save. The drafts are cleared only after
+      // the Host section verifiably carries the edits — a REFUSED write
+      // settles without throwing (the form re-reads Host state instead), and
+      // clearing on a refusal would throw the user's input away while showing
+      // them nothing at all.
+      const ops: SettingsPathOp[] = []
+      for (const [field, draft] of drafts) {
+        if (!draft.dirty) continue
+        ops.push({ op: 'set', path: [field], value: draftValue(field, draft.text) })
+      }
+      const outcome = await commitOps(scope, ops)
+      if (!outcome.ok) {
+        failed = true
+        console.error('vision-plugin: settings write did not land; drafts kept for the user to retry', {
+          ops,
+          outcome,
+          revision: scope.getSnapshot().revision,
+        })
+        return
+      }
+      drafts.clear()
+    } catch (error: unknown) {
+      failed = true
+      console.error('vision-plugin: failed to save section', error)
+    } finally {
+      saving = false
+      publish()
+    }
+  }
 
-    const sectionInjected = (): VisionModelsSectionInjected => ({
-      store,
-      t,
-      edit,
-      discard,
-      save,
-      test,
-    })
-
-    scoped.slots.inject('settings.section', () => scoped.slots.register({
-      name: 'settings.section',
-      id: 'vision-models',
-      order: 60,
-      label: () => t('section.nav'),
-      inject: sectionInjected,
-    }, VisionModelsSection))
+  const sectionInjected = (): VisionModelsSectionInjected => ({
+    store,
+    t,
+    edit,
+    discard,
+    save,
+    test,
   })
+
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'vision-models',
+    order: 60,
+    label: () => t('section.nav'),
+    inject: sectionInjected,
+  }, VisionModelsSection))
 }
 
 export type { VisionPluginKey }

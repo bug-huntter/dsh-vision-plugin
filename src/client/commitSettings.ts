@@ -28,16 +28,17 @@ export interface SettingsPathOp {
 }
 
 /**
- * Structural subset of the bound client settings scope this module needs.
+ * Structural subset of the bound client settings form this module needs.
  *
  * `mutate` is the current contract (one atomic namespace mutation sharing a
- * single revision fence). `set` is the older per-field face, kept as a fallback
- * so the section still writes on DSH builds whose scope predates `mutate` — the
- * outcome is reported by verification either way, never by an exception.
+ * single revision fence, resolving `true` when the Host accepted the write).
+ * `set` is the per-field face, kept as a fallback so the section still writes
+ * on DSH builds whose form predates `mutate` — the outcome is reported by
+ * verification either way, never by an exception.
  */
 export interface SettingsWriteScope<T> {
-  mutate?(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>
-  set?(field: string, value: unknown): Promise<void>
+  mutate?(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<boolean>
+  set?(field: string, value: unknown): Promise<boolean>
   getSnapshot(): SettingsWriteSnapshot<T>
 }
 
