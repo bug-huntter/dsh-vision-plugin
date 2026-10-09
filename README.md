@@ -169,6 +169,14 @@ try {
 
 **回归测试**：`test/key-resolution.test.mjs`（唯一来源）、`test/auth-headers.test.mjs`（四种格式的请求头、空 key 不发鉴权头、格式归一化）、`test/commit-settings.test.mjs`（保存写入结果判定）。
 
+## v1.2.3 DSH 0.1.7-rc.2 图片链路修复
+
+- 修复 `settings.baseUrl.trim is not a function`：兼容 DSH `0.1.7-rc.2` 的 volatile 配置对象，统一通过 `.get()` 读取配置值
+- 修复 `adapterStream` 提前把图片投影为占位符后，视觉请求缺少实际图片内容的问题；现在在最终边界保留并转写图片
+- 修复对话中启用插件且测试通过、发送图片仍显示失败的问题
+- 增加运行时 Context 服务读取、默认导出和原型方法补丁的回归测试
+- 已在本机 DSH `0.1.7-rc.2` 实测图片识别正常
+
 
 ## 安装
 
@@ -176,16 +184,16 @@ try {
 
 | DSH 版本 | 兼容性 |
 | --- | --- |
-| `0.1.7-rc.2` | 已适配（当前本机验证版本）：宿主端走 `Config` 导出 + `.volatile()` 字段，浏览器端经 `configForms` 服务绑定设置表单 |
+| `0.1.7-rc.2` | 已适配（`v1.2.3` 本机实测）：宿主端走 `Config` 导出 + `.volatile()` 字段，浏览器端经 `configForms` 服务绑定设置表单 |
 | `0.1.2-rc.1` 及同代 0.1.2 rc | 仍走 `settings.register` + `settingsScope` 旧 API（理论兼容，建议实际验证） |
 | `0.1.0-rc.7` 至 0.1.2-alpha 之前 | 使用相同的 `settings.register` 服务 API，理论兼容，建议实际验证 |
 | `0.1.0-rc.7` 之前 / 0.0.x | 不支持，当时尚无插件所需的 settings/section 机制 |
 
 > `v1.0.3` 起不再引用已移除的 `settingsNamespace` 和 `@deepseek-ai/dsh-client-runtime`。
-> `v1.2.1` 起适配 DSH `0.1.7-rc.2`：`ctx.settings.register(ns, schema)` 与
+> `v1.2.3` 起适配 DSH `0.1.7-rc.2`：`ctx.settings.register(ns, schema)` 与
 > `ctx.settingsScope` 已被移除，改为导出 `Config` schema（UI 可编辑字段标
-> `.volatile()`），浏览器端经 `ctx.configForms.get(ns)` 绑定表单；保存后宿主
-> fiber 热重载并携带新配置。
+> `.volatile()`），读取配置时解引用 `.get()`，浏览器端经 `ctx.configForms.get(ns)`
+> 绑定表单；保存后宿主 fiber 热重载并携带新配置。
 
 ### 前置条件
 

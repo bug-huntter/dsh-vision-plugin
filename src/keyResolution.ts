@@ -1,3 +1,5 @@
+import { stringSetting, type SettingValue } from './settingsValue.ts'
+
 /**
  * Vision-model API key resolution.
  *
@@ -38,7 +40,7 @@ export interface VisionKeyResolution {
 /** The subset of the plugin settings that participates in key resolution. */
 export interface VisionKeySettings {
   /** The one field an API key may come from. */
-  apiKey?: string
+  apiKey?: SettingValue<string>
 }
 
 /**
@@ -52,6 +54,6 @@ export function resolveVisionKey(settings: VisionKeySettings | undefined): Visio
   // Surrounding whitespace is dropped — `Bearer  sk-…` is rejected by
   // aggregators as a missing header — and a whitespace-only value counts as
   // unfilled rather than as a key.
-  const key = settings?.apiKey?.trim() ?? ''
+  const key = stringSetting(settings?.apiKey).trim()
   return key.length === 0 ? { key: '', source: 'none' } : { key, source: 'apiKey' }
 }

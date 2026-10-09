@@ -33,6 +33,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { VISION_PLUGIN_NAMESPACE } from './constants.ts'
 import { authHeaders, DEFAULT_KEY_FORMAT, normalizeKeyFormat, type KeyFormat } from './authHeaders.ts'
 import { resolveVisionKey, type VisionKeyResolution } from './keyResolution.ts'
+import { booleanSetting, numberSetting, stringSetting } from './settingsValue.ts'
 
 export interface VisionPluginSettings {
   /** Whether image recognition is enabled. */
@@ -93,6 +94,20 @@ const VisionPluginSettingsSchema: z<VisionPluginSettings> = z.object({
  * profile entry a configurable form (describe/mutate) for the client card.
  */
 export const Config: z<VisionPluginSettings> = VisionPluginSettingsSchema
+
+function normalizeVisionSettings(settings: VisionPluginSettings): VisionPluginSettings {
+  return {
+    enabled: booleanSetting(settings.enabled),
+    baseUrl: stringSetting(settings.baseUrl),
+    modelId: stringSetting(settings.modelId),
+    apiKey: stringSetting(settings.apiKey),
+    keyFormat: normalizeKeyFormat(stringSetting(settings.keyFormat)),
+    prompt: stringSetting(settings.prompt),
+    timeoutMs: numberSetting(settings.timeoutMs, 120000),
+    maxRetries: numberSetting(settings.maxRetries, 3),
+    fallbackModelId: stringSetting(settings.fallbackModelId),
+  }
+}
 
 /** Base delay (ms) for the first exponential-backoff wait on a transient error. */
 const RETRY_BASE_DELAY_MS = 1000
@@ -214,6 +229,121 @@ function mapBlocksReplacingImages(
   return changed ? result : undefined
 }
 
+function rewriteMessagesReplacingImages(
+  messages: readonly Message[],
+  nextTranscription: () => string,
+): Message[] {
+  let changed = false
+  const result: Message[] = []
+  for (const message of messages) {
+    const content = mapBlocksReplacingImages(message.content, nextTranscription)
+    if (content === undefined) {
+      result.push(message)
+      continue
+    }
+    changed = true
+    result.push({ ...message, content })
+  }
+  return changed ? result : [...messages]
+}
+
+function requestNeedsTranscription(
+  settings: VisionPluginSettings,
+  messages: readonly Message[],
+): boolean {
+  const resolved = normalizeVisionSettings(settings)
+  return resolved.enabled
+    && resolved.baseUrl.trim().length > 0
+    && resolved.modelId.trim().length > 0
+    && messages.some((message) => messageHasImage(message.content))
+}
+
+function fallbackRequest(
+  ctx: Context,
+  options: GenerateOptions,
+  error: unknown,
+): GenerateOptions {
+  const detail = errorMessage(error)
+  const hint = hintOf(error)
+  visionLogger(ctx)?.error(
+    `vision-plugin: image transcription failed; continuing with a text placeholder: ${detail}${hint}`,
+  )
+  const notice = `[图片转写失败：${detail.slice(0, 200)}${hint}——该图片未传递给模型]`
+  return {
+    ...options,
+    messages: rewriteMessagesReplacingImages(options.messages, () => notice),
+  }
+}
+
+async function transcribeRequest(
+  ctx: Context,
+  settings: VisionPluginSettings,
+  options: GenerateOptions,
+): Promise<GenerateOptions> {
+  const resolvedSettings = normalizeVisionSettings(settings)
+  const attachments = ctx.get('attachments') as {
+    readImage: (ref: ImageRef, signal?: AbortSignal) => Promise<{ data: Uint8Array }>
+  } | undefined
+  if (attachments === undefined) {
+    throw new Error('vision-plugin: durable attachment service is unavailable')
+  }
+  const refs: ImageRef[] = []
+  for (const message of options.messages) collectImageRefs(message.content, refs)
+  if (refs.length === 0) return options
+  const resolution = resolveVisionKey(resolvedSettings)
+  if (resolution.source === 'none') {
+    visionLogger(ctx)?.error(
+      `vision-plugin: image transcription skipped — ${missingKeyMessage(resolvedSettings.keyFormat)}`,
+    )
+  }
+  const transcriptions = await Promise.all(refs.map(async (ref) => {
+    const stored = await attachments.readImage(ref, options.signal)
+    return transcribeImage(stored.data, ref.mediaType, resolution, resolvedSettings, options.signal)
+  }))
+  let cursor = 0
+  const nextTranscription = (): string => {
+    const text = transcriptions[cursor]
+    if (text === undefined) throw new Error('vision transcription queue exhausted')
+    cursor += 1
+    return `${TRANSCRIPTION_PREFIX}\n${text}`
+  }
+  return {
+    ...options,
+    messages: rewriteMessagesReplacingImages(options.messages, nextTranscription),
+  }
+}
+
+type StreamMethod = (options: GenerateOptions, prepared?: unknown) => AsyncIterable<StreamChunk>
+
+interface MethodPatch {
+  target: object
+  descriptor: PropertyDescriptor
+  original: (...args: unknown[]) => unknown
+}
+
+function methodPatch(instance: object, name: string): MethodPatch | undefined {
+  const prototype = Object.getPrototypeOf(instance) as object | null
+  const ownDescriptor = Object.getOwnPropertyDescriptor(instance, name)
+  const prototypeDescriptor = prototype === null
+    ? undefined
+    : Object.getOwnPropertyDescriptor(prototype, name)
+  const descriptor = ownDescriptor ?? prototypeDescriptor
+  const original = descriptor?.value
+  if (typeof original !== 'function') return undefined
+  return {
+    target: ownDescriptor === undefined && prototypeDescriptor !== undefined ? prototype : instance,
+    descriptor,
+    original,
+  }
+}
+
+function abortedChunk(): StreamChunk {
+  return {
+    type: 'finish',
+    reason: { kind: 'aborted', failure: { message: 'aborted', code: 'ABORTED' } },
+  } as StreamChunk
+}
+
 /** Error carrying the HTTP status (and Retry-After) of a failed transcription request. */
 interface VisionHttpError extends Error {
   status?: number
@@ -302,6 +432,7 @@ async function transcribeImage(
   settings: VisionPluginSettings,
   signal: AbortSignal | undefined,
 ): Promise<string> {
+  settings = normalizeVisionSettings(settings)
   const apiKey = resolution.key
   const keyFormat = normalizeKeyFormat(settings.keyFormat)
   // Fail fast, before any network I/O: with a single, visible key source there
@@ -332,7 +463,7 @@ async function transcribeImage(
       }
       let response: Response
       try {
-        response = await fetch(url, {
+        response = await globalThis.fetch(url, {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -343,7 +474,7 @@ async function transcribeImage(
               role: 'user',
               content: [
                 { type: 'image_url', image_url: { url: dataUrl } },
-                { type: 'text', text: settings.prompt?.trim() !== '' ? settings.prompt.trim() : DEFAULT_TRANSCRIBE_PROMPT },
+                { type: 'text', text: settings.prompt?.trim() || DEFAULT_TRANSCRIBE_PROMPT },
               ],
             }],
           }),
@@ -447,8 +578,8 @@ function installImageGuardBypass(ctx: Context, settings: VisionPluginSettings, l
     active = false
   }
   const apply = (enabled: boolean): void => { enabled ? activate() : deactivate() }
-    apply(settings.enabled)
-  }
+  apply(booleanSetting(settings.enabled))
+}
 
   /**
    * Rewrite a request's image blocks into vision-model transcriptions, yielding
@@ -461,108 +592,70 @@ function installImageGuardBypass(ctx: Context, settings: VisionPluginSettings, l
    * rewritten call. The original request object is never mutated; loop-built
    * requests arrive deep-frozen.
    */
-  function installImageTranscription(ctx: Context, settings: VisionPluginSettings, llm: LlmRuntime): void {
+function installImageTranscription(ctx: Context, settings: VisionPluginSettings, llm: LlmRuntime): void {
   const instance = llm[symbols.original] ?? llm
-  const originalStream = Reflect.get(instance, 'streamWithRegistration') as ((options: GenerateOptions, prepared?: unknown) => AsyncIterable<StreamChunk>) | undefined
-  if (typeof originalStream !== 'function') return
-  const stream = (options: GenerateOptions, prepared?: unknown): AsyncIterable<StreamChunk> => originalStream.call(instance, options, prepared)
-  const transcribingStream = async function* (options: GenerateOptions, prepared?: unknown): AsyncGenerator<StreamChunk> {
-      const needsTranscription = settings.enabled
-      && settings.baseUrl.length > 0
-      && settings.modelId.length > 0
-      && options.messages.some((message) => message.role === 'user' && messageHasImage(message.content))
-    if (!needsTranscription) {
-      yield* stream(options, prepared)
-      return
-    }
-    const attachments = ctx.get('attachments') as { readImage: (ref: ImageRef, signal?: AbortSignal) => Promise<{ data: Uint8Array }> } | undefined
+  const streamPatch = methodPatch(instance, 'streamWithRegistration')
+  const adapterPatch = methodPatch(instance, 'adapterStream')
+  if (streamPatch === undefined && adapterPatch === undefined) {
+    visionLogger(ctx)?.error('vision-plugin: no compatible LLM stream boundary was found')
+    return
+  }
+
+  const prepare = async (
+    options: GenerateOptions,
+  ): Promise<{ options: GenerateOptions; aborted: boolean }> => {
+    if (!requestNeedsTranscription(settings, options.messages)) return { options, aborted: false }
+    if (options.signal?.aborted === true) return { options, aborted: true }
     try {
-      if (options.signal?.aborted) {
-        yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'aborted', code: 'ABORTED' } } }
-        return
-      }
-      if (attachments === undefined) {
-        // Without the durable attachment service the image bytes cannot be
-        // read; pass the request through so the provider's own error names
-        // the cause.
-        yield* stream(options, prepared)
-        return
-      }
-      const refs: ImageRef[] = []
-      for (const message of options.messages) {
-        if (message.role !== 'user') continue
-        collectImageRefs(message.content, refs)
-      }
-      if (refs.length === 0) {
-        yield* stream(options, prepared)
-        return
-      }
-      const resolution = resolveVisionKey(settings)
-      if (resolution.source === 'none') {
-        // Logged as well as reported in the notice, so a failed turn is
-        // diagnosable from the host log alone.
-        visionLogger(ctx)?.error(
-          `vision-plugin: image transcription skipped — ${missingKeyMessage(normalizeKeyFormat(settings.keyFormat))}`,
-        )
-      }
-      const transcriptions = await Promise.all(refs.map((ref) =>
-        attachments.readImage(ref, options.signal)
-          .then((stored) => transcribeImage(stored.data, ref.mediaType, resolution, settings, options.signal))))
-      let cursor = 0
-      const nextTranscription = (): string => {
-        const text = transcriptions[cursor]
-        if (text === undefined) throw new Error('vision transcription queue exhausted')
-        cursor += 1
-        return `${TRANSCRIPTION_PREFIX}\n${text}`
-      }
-      const transformed: Message[] = options.messages.map((message) => {
-        if (message.role !== 'user') return message
-        const content = mapBlocksReplacingImages(message.content, nextTranscription)
-        return content === undefined ? message : { ...message, content }
-      })
-      yield* stream({ ...options, messages: transformed }, prepared)
+      return { options: await transcribeRequest(ctx, settings, options), aborted: false }
     } catch (error: unknown) {
-      // A caller abort (user stop / timeout upstream) must surface as an
-      // aborted finish, not as a transcription failure.
-      if (options.signal?.aborted === true) {
-        yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'aborted', code: 'ABORTED' } } }
+      if (options.signal?.aborted === true) return { options, aborted: true }
+      return { options: fallbackRequest(ctx, options, error), aborted: false }
+    }
+  }
+
+  const wrapStream = (patch: MethodPatch): StreamMethod => {
+    const original = patch.original as StreamMethod
+    return async function* (this: object, options: GenerateOptions, prepared?: unknown): AsyncGenerator<StreamChunk> {
+      const preparedRequest = await prepare(options)
+      if (preparedRequest.aborted) {
+        yield abortedChunk()
         return
       }
-      // Transcription failed: do NOT kill the whole turn. Replace every image
-      // block with a short text notice and stream the rewritten request, so
-      // the conversation continues and the (text-only) main model never
-      // receives raw image bytes it cannot handle. The failure is logged for
-      // diagnosis instead of aborting the conversation.
-      const logger = visionLogger(ctx)
-      const detail = errorMessage(error)
-      const hint = hintOf(error)
-      logger?.error(`vision-plugin: image transcription failed; continuing with a text placeholder: ${detail}${hint}`)
-      // The hint trails the (truncated) detail so a long provider body can never
-      // push the actionable part out of the notice the user actually reads.
-      const notice = `[图片转写失败：${detail.slice(0, 200)}${hint}——该图片未传递给模型]`
-      const messages = options.messages ?? []
-      const fallback: Message[] = messages.map((message) => {
-        if (message.role !== 'user') return message
-        const content = mapBlocksReplacingImages(message.content, () => notice)
-        return content === undefined ? message : { ...message, content }
-      })
-      yield* stream({ ...options, messages: fallback }, prepared)
+      yield* original.call(this, preparedRequest.options, prepared)
     }
-  } as (options: GenerateOptions, prepared?: unknown) => AsyncIterable<StreamChunk>
+  }
+
+  const wrapAdapterStream = (patch: MethodPatch): StreamMethod => {
+    const original = patch.original as StreamMethod
+    return async function* (this: object, options: GenerateOptions, prepared?: unknown): AsyncGenerator<StreamChunk> {
+      const preparedRequest = await prepare(options)
+      if (preparedRequest.aborted) {
+        yield abortedChunk()
+        return
+      }
+      yield* original.call(this, preparedRequest.options, prepared)
+    }
+  }
+
   ctx.effect(() => {
-      Object.defineProperty(instance, 'streamWithRegistration', {
-        value: (options: GenerateOptions, prepared?: unknown): AsyncIterable<StreamChunk> => {
-          if (settings.enabled) return transcribingStream(options, prepared)
-          return stream(options, prepared)
-        },
+    const restores: (() => void)[] = []
+    const install = (patch: MethodPatch | undefined, name: string, value: StreamMethod): void => {
+      if (patch === undefined) return
+      Object.defineProperty(patch.target, name, {
+        value,
         writable: true,
         configurable: true,
       })
-      return () => {
-        delete instance.streamWithRegistration
-      }
-    }, 'vision-plugin: image transcription boundary')
-  }
+      restores.push(() => Object.defineProperty(patch.target, name, patch.descriptor))
+    }
+    if (streamPatch !== undefined) install(streamPatch, 'streamWithRegistration', wrapStream(streamPatch))
+    if (adapterPatch !== undefined) install(adapterPatch, 'adapterStream', wrapAdapterStream(adapterPatch))
+    return () => {
+      for (const restore of restores.reverse()) restore()
+    }
+  }, 'vision-plugin: image transcription boundary')
+}
 
   /**
    * Arm the vision pipeline. 0.1.7 settings contract: the namespace schema is
@@ -570,16 +663,17 @@ function installImageGuardBypass(ctx: Context, settings: VisionPluginSettings, l
    * re-runs apply with the fresh config, so `enabled` and every field are read
    * from the `config` argument directly (no runtime scope/watch needed).
    */
-  export function apply(ctx: Context, config: VisionPluginSettings): void {
+export function apply(ctx: Context, config: VisionPluginSettings): void {
     // Image pipeline: needs llm and the durable attachment reader. Wrapped in
     // try/catch so the UI remains usable and the error is logged even if the
     // runtime surface changes shape.
-    ctx.inject(['llm', 'attachments'], (both) => {
+    ctx.inject(['llm', 'attachments'], (injectedCtx) => {
       try {
-        installImageGuardBypass(both, config, both.llm)
-        installImageTranscription(both, config, both.llm)
+        const llm = injectedCtx.get('llm')
+        installImageGuardBypass(injectedCtx, config, llm)
+        installImageTranscription(injectedCtx, config, llm)
       } catch (error: unknown) {
-        const logger = both.logger ?? ctx.logger
+        const logger = injectedCtx.logger ?? ctx.logger
         logger?.error('vision-plugin: failed to install image pipeline patches', error)
       }
     })
@@ -589,18 +683,24 @@ function installImageGuardBypass(ctx: Context, settings: VisionPluginSettings, l
     // every write is refused with "settings-not-exposed", which surfaces as
     // "保存失败，请重试". settingsNs must equal the profile entry id
     // (`vision-plugin`), matching the Config export above.
-    ctx.inject(['llm'], (both) => {
-      const handle = both.llm.registerConfigurableProviders([{
+    ctx.inject(['llm'], (injectedCtx) => {
+      const handle = injectedCtx.get('llm').registerConfigurableProviders([{
         provider: 'vision-plugin-settings',
         displayName: '识图模型配置',
         settingsNs: VISION_PLUGIN_NAMESPACE,
         settingsPath: [],
       }])
-      both.effect(() => handle, 'vision-plugin: settings namespace exposure')
+      injectedCtx.effect(() => handle, 'vision-plugin: settings namespace exposure')
     })
   }
 
-  export { VISION_PLUGIN_NAMESPACE }
+const visionPlugin = Object.assign(apply, {
+  Config: VisionPluginSettingsSchema,
+})
+
+export default visionPlugin
+
+export { VISION_PLUGIN_NAMESPACE }
 
 
 

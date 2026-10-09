@@ -46,6 +46,11 @@ const cases = [
     expected: { key: 'sk-or-v1-typed', source: 'apiKey' },
   },
   {
+    name: 'DSH volatile settings resolve through get()',
+    settings: { apiKey: { get: () => 'sk-or-v1-volatile' } },
+    expected: { key: 'sk-or-v1-volatile', source: 'apiKey' },
+  },
+  {
     name: 'surrounding whitespace is stripped (Bearer  sk-… reads as a missing header)',
     settings: { apiKey: '  sk-or-v1-typed\n' },
     expected: { key: 'sk-or-v1-typed', source: 'apiKey' },
